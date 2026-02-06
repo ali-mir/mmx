@@ -1,4 +1,4 @@
-# MongoMetrics (mmx)
+# mongometrics (mmx)
 
 An htop-like CLI tool that parses MongoDB FTDC (Full Time Diagnostic Data Capture) files and presents metrics in a real-time, colorful TUI.
 

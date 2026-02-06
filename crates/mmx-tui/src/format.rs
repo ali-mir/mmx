@@ -39,25 +39,32 @@ fn is_micros_metric(path: &str) -> bool {
 }
 
 fn is_timestamp_metric(path: &str, value: i64) -> bool {
-    // Path-based: fields commonly holding epoch-ms timestamps
-    let path_match = path.ends_with(".start")
+    // Value must look like epoch-ms between 2000-01-01 and 2100-01-01
+    if !(946_684_800_000..=4_102_444_800_000).contains(&value) {
+        return false;
+    }
+
+    // Top-level start/end fields
+    if path == "start" || path == "end" {
+        return true;
+    }
+
+    // Path suffix patterns for timestamp fields
+    path.ends_with(".start")
         || path.ends_with(".end")
+        || path.ends_with(".localtime")
         || path.ends_with(".clustertime")
         || path.ends_with(".operationtime")
         || path.ends_with(".lastupdated")
         || path.ends_with(".readtimestamp")
         || path.ends_with(".oldestactivetimestamp")
         || path.ends_with(".stabletimestamp")
-        || path.ends_with(".oldestTimestamp")
+        || path.ends_with(".oldesttimestamp")
         || path.ends_with(".walltime")
         || path.ends_with(".date")
         || path.ends_with(".lastapplied")
-        || path.ends_with(".lastdurable");
-
-    // Value-based fallback: looks like epoch-ms between 2000-01-01 and 2100-01-01
-    let value_looks_like_epoch_ms = (946_684_800_000..=4_102_444_800_000).contains(&value);
-
-    path_match && value_looks_like_epoch_ms
+        || path.ends_with(".lastdurable")
+        || path.contains("timestamp") // catch-all for *Timestamp* fields
 }
 
 fn format_bytes(value: i64) -> String {

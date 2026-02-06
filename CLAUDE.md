@@ -130,6 +130,7 @@ Event loop: tokio async with separate tick (1s, advance sample) and render (100m
 - [ ] Metric source trait: abstract data source behind `trait MetricSource`
 - [ ] TUI snapshot tests: use ratatui `TestBackend` for rendered output assertions
 - [ ] File watcher: use `notify` crate to detect new/rotated FTDC files instead of polling
+- [ ] Scroll performance: scrolling through 5000+ metrics feels sluggish — profile and optimize the render path (filter/sort/slice before rendering, avoid re-allocating on every frame, consider only rendering visible rows)
 
 ## Testing with Live FTDC Data
 

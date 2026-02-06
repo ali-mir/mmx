@@ -74,22 +74,42 @@ fn latest_sample(chunks: &[DecodedChunk]) -> Option<(Vec<MetricEntry>, Option<i6
     Some((metrics, timestamp))
 }
 
-/// Load all FTDC chunks from a path. Reads each file into memory first
-/// so partially-written interim files don't cause streaming read issues.
+/// Try to read an FTDC file into chunks. Returns empty vec on failure.
+fn try_read_ftdc_file(path: &std::path::Path) -> Vec<DecodedChunk> {
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let cursor = io::Cursor::new(data);
+    reader::read_ftdc_file(cursor).unwrap_or_default()
+}
+
+/// Load all FTDC chunks. Retries the interim file (the live data source)
+/// a few times since it's being actively rewritten by mongod every second.
 fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChunk>> {
     let files = reader::find_ftdc_files(path)?;
     let mut all_chunks: Vec<DecodedChunk> = Vec::new();
 
     for file_path in &files {
-        let data = match std::fs::read(file_path) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
+        let is_interim = file_path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains("interim"));
 
-        let cursor = io::Cursor::new(data);
-        match reader::read_ftdc_file(cursor) {
-            Ok(chunks) => all_chunks.extend(chunks),
-            Err(_) => continue,
+        if is_interim {
+            // Retry interim file — it's rewritten every second by mongod
+            // and we may catch it mid-write. Try a few times with short delays.
+            for attempt in 0..5 {
+                let chunks = try_read_ftdc_file(file_path);
+                if !chunks.is_empty() {
+                    all_chunks.extend(chunks);
+                    break;
+                }
+                if attempt < 4 {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        } else {
+            all_chunks.extend(try_read_ftdc_file(file_path));
         }
     }
 

@@ -22,11 +22,26 @@ An htop-like TUI for exploring MongoDB FTDC (Full Time Diagnostic Data Capture) 
 └─────────────────────────────────────────────────────┘
 ```
 
-## Install
+## Prerequisites
+
+- Rust 1.85+ (`rustup` recommended: https://rustup.rs)
+
+## Build
 
 ```bash
+git clone <repo-url> && cd mmx
+
+# Debug build
+cargo build
+
+# Release build (optimized)
+cargo build --release
+
+# Install to ~/.cargo/bin
 cargo install --path crates/mmx-tui
 ```
+
+The binary is called `mmx` and will be at `target/release/mmx` (or `target/debug/mmx`).
 
 ## Usage
 
@@ -97,7 +112,7 @@ Metric values are formatted based on path heuristics:
 
 ```bash
 cargo build                    # Build
-cargo test                     # Test (40 tests)
+cargo test                     # Test (43 tests)
 cargo clippy -- -D warnings    # Lint
 cargo fmt                      # Format
 ```

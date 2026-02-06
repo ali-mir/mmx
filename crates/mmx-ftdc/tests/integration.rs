@@ -87,3 +87,104 @@ fn test_parse_real_ftdc_files() {
     assert!(total_metrics > 0, "should have metrics in chunks");
     assert!(total_samples > 0, "should have samples");
 }
+
+#[test]
+fn test_start_timestamp_changes_across_samples() {
+    let dir = test_data_dir();
+    if !dir.exists() {
+        eprintln!("Skipping: test-data not present at {}", dir.display());
+        return;
+    }
+
+    let files = reader::find_ftdc_files(&dir).expect("find ftdc files");
+
+    for file_path in &files {
+        let file = std::fs::File::open(file_path).expect("open file");
+        let reader = BufReader::new(file);
+        let ftdc = reader::FtdcReader::new(reader);
+
+        for record in ftdc {
+            let Ok(FtdcRecord::MetricChunk(chunk)) = record else {
+                continue;
+            };
+            let Some(start_metric) = chunk.metrics.iter().find(|m| m.path == "start") else {
+                continue;
+            };
+
+            if start_metric.values.len() < 2 {
+                continue;
+            }
+
+            // start timestamp should increase between samples (~1000ms apart)
+            let mut changed = false;
+            for window in start_metric.values.windows(2) {
+                if window[1] != window[0] {
+                    changed = true;
+                    assert!(
+                        window[1] > window[0],
+                        "start timestamp should increase: {} -> {}",
+                        window[0],
+                        window[1]
+                    );
+                }
+            }
+            assert!(changed, "start timestamp should change across samples");
+            return; // Only need to verify one chunk
+        }
+    }
+    panic!("no metric chunks found");
+}
+
+#[test]
+fn test_uptime_millis_increases() {
+    let dir = test_data_dir();
+    if !dir.exists() {
+        eprintln!("Skipping: test-data not present at {}", dir.display());
+        return;
+    }
+
+    let files = reader::find_ftdc_files(&dir).expect("find ftdc files");
+    let mut all_uptime_values: Vec<i64> = Vec::new();
+
+    for file_path in &files {
+        let file = std::fs::File::open(file_path).expect("open file");
+        let reader = BufReader::new(file);
+        let ftdc = reader::FtdcReader::new(reader);
+
+        for record in ftdc {
+            let Ok(FtdcRecord::MetricChunk(chunk)) = record else {
+                continue;
+            };
+            let Some(uptime) = chunk
+                .metrics
+                .iter()
+                .find(|m| m.path == "serverStatus.uptimeMillis")
+            else {
+                continue;
+            };
+
+            // uptimeMillis should be non-decreasing within each chunk
+            for window in uptime.values.windows(2) {
+                assert!(
+                    window[1] >= window[0],
+                    "uptimeMillis should not decrease: {} -> {}",
+                    window[0],
+                    window[1]
+                );
+            }
+            all_uptime_values.extend_from_slice(&uptime.values);
+        }
+    }
+
+    assert!(
+        !all_uptime_values.is_empty(),
+        "should find serverStatus.uptimeMillis in at least one chunk"
+    );
+    // Overall, uptimeMillis should increase across all chunks
+    let first = all_uptime_values.first().unwrap();
+    let last = all_uptime_values.last().unwrap();
+    assert!(
+        last > first,
+        "uptimeMillis should increase across chunks: {first} -> {last}"
+    );
+}

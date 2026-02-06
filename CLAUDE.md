@@ -39,7 +39,7 @@ mmx/
 
 ```bash
 cargo build                    # Build all crates
-cargo test                     # Run all tests (44 tests)
+cargo test                     # Run all tests (49 tests)
 cargo clippy -- -D warnings    # Lint with strict warnings
 cargo fmt --check              # Check formatting
 cargo run --bin mmx -- <path>  # Run the TUI with an FTDC file/directory
@@ -154,4 +154,4 @@ The test data in `test-data/diagnostic.data/` is **static** — no live mongod w
 
 ## Known Bugs
 
-- **Delta stream decoding truncation**: The FTDC delta stream (column-major varint deltas with zero-RLE) is consumed entirely by the first ~770 metrics out of ~5211. `serverStatus.*` metrics (starting at index ~1969) get zero deltas and appear frozen at reference values. Root cause: the decoder over-consumes bytes for early metric columns, starving later columns. This is why the TUI shows unchanging values for key metrics like `opcounters`, `uptimeMillis`, and `connections`.
+None currently.

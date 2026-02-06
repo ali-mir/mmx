@@ -61,26 +61,7 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
     let sample_count =
         u32::from_le_bytes([remaining[4], remaining[5], remaining[6], remaining[7]]) as usize;
 
-    // Verify BSON doc size matches cursor position
-    let bson_doc_size = u32::from_le_bytes([
-        decompressed[0], decompressed[1], decompressed[2], decompressed[3],
-    ]) as usize;
-    eprintln!(
-        "FTDC chunk: bson_doc_size={bson_doc_size} cursor_after_doc={pos} \
-         metric_count={metric_count} sample_count={sample_count} \
-         decompressed_len={} delta_bytes={}",
-        decompressed.len(),
-        decompressed.len() - pos - 8
-    );
-    if bson_doc_size != pos {
-        eprintln!("  WARNING: BSON doc size mismatch! doc says {} but cursor at {}", bson_doc_size, pos);
-    }
-
     cursor.set_position((pos + 8) as u64);
-
-    // Show top-level keys to verify BSON key order
-    let top_keys: Vec<&str> = ref_doc.keys().map(|k| k.as_str()).collect();
-    eprintln!("  top_keys={:?}", &top_keys[..top_keys.len().min(10)]);
 
     // Flatten reference doc to get metric names and reference values
     let ref_metrics: Vec<FlatMetric> = flatten_bson(&ref_doc);
@@ -105,16 +86,7 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
 
     // Decode delta stream (column-major with zero-RLE).
     // When the stream ends early, remaining deltas are implicitly zero.
-    let delta_stream_start = cursor.position() as usize;
-    let delta_stream_len = decompressed.len() - delta_stream_start;
     let deltas = decode_deltas(&mut cursor, metric_count, sample_count);
-    let bytes_consumed = cursor.position() as usize - delta_stream_start;
-    if bytes_consumed < delta_stream_len {
-        eprintln!(
-            "FTDC: delta stream {bytes_consumed}/{delta_stream_len} bytes consumed ({} unused)",
-            delta_stream_len - bytes_consumed
-        );
-    }
 
     // Apply cumulative sum from reference values to build actual values
     let metrics = ref_metrics
@@ -141,37 +113,44 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
 }
 
 /// Decode the varint delta stream.
-/// When the stream ends early, remaining deltas are implicitly zero
-/// (this is normal — MongoDB omits trailing all-zero metric deltas).
+///
+/// MongoDB's FTDC encoding: column-major deltas with zero-RLE.
+/// The zero run counter persists across metric column boundaries —
+/// a single zero-RLE pair can span multiple metrics.
+///
+/// Encoding: varint(0) varint(N) means 1 zero (from the marker) + N more zeros.
+/// When the stream ends early, remaining deltas are implicitly zero.
 fn decode_deltas(
     cursor: &mut Cursor<&Vec<u8>>,
     metric_count: usize,
     sample_count: usize,
 ) -> Vec<Vec<i64>> {
     let mut deltas = vec![vec![0i64; sample_count]; metric_count];
+    let mut zeros_remaining: u64 = 0;
 
-    for (metric_idx, metric_deltas) in deltas.iter_mut().enumerate() {
-        let mut sample_idx = 0;
-        while sample_idx < sample_count {
+    for metric_deltas in deltas.iter_mut() {
+        for delta in metric_deltas.iter_mut() {
+            if zeros_remaining > 0 {
+                // Still consuming a zero run — delta is already 0
+                zeros_remaining -= 1;
+                continue;
+            }
+
             let Ok(raw) = read_uvarint(cursor) else {
                 // Stream exhausted — remaining deltas are implicitly zero
-                if metric_idx < metric_count - 1 {
-                    eprintln!(
-                        "FTDC: delta stream ended at metric {}/{} sample {}/{}",
-                        metric_idx, metric_count, sample_idx, sample_count
-                    );
-                }
                 return deltas;
             };
+
             if raw == 0 {
-                let Ok(zero_count) = read_uvarint(cursor) else {
+                // Zero-RLE: varint(0) varint(N) means current position is 0,
+                // then N more zeros follow (spanning across metric boundaries)
+                let Ok(count) = read_uvarint(cursor) else {
                     return deltas;
                 };
-                sample_idx += 1 + zero_count as usize;
+                zeros_remaining = count;
+                // Current position delta is already 0
             } else {
-                // Deltas are unsigned varints — cast to i64 for wrapping arithmetic
-                metric_deltas[sample_idx] = raw as i64;
-                sample_idx += 1;
+                *delta = raw as i64;
             }
         }
     }
@@ -318,18 +297,127 @@ mod tests {
     fn test_decode_chunk_with_zero_rle() {
         // Reference: a=5
         // 4 additional samples
-        // Deltas for a: 0 (zero-RLE: 0 then run of 3 more) -> 4 zeros total
+        // Deltas for a: 4 zeros
+        // Encoding: varint(0) varint(3) → 1 zero (marker) + 3 more = 4 total
         // Values: 5, 5, 5, 5, 5
         let ref_doc = bson::doc! { "a": 5_i64 };
 
         let mut delta_bytes = Vec::new();
-        // Zero-RLE: varint 0, then varint 3 (meaning 3 additional zeros after the first)
-        delta_bytes.extend_from_slice(&encode_uvarint(0)); // delta is 0
+        delta_bytes.extend_from_slice(&encode_uvarint(0)); // zero marker
         delta_bytes.extend_from_slice(&encode_uvarint(3)); // 3 more zeros
 
         let data = build_test_chunk(&ref_doc, 1, 4, &delta_bytes);
         let chunk = decode_chunk(&data).unwrap();
 
         assert_eq!(chunk.metrics[0].values, vec![5, 5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn test_decode_chunk_mixed_zeros_and_nonzeros() {
+        // Reference: a=0, 5 additional samples
+        // Deltas: [0, 0, 5, 0, 3]
+        // Encoding: varint(0) varint(1) [1+1=2 zeros], varint(5),
+        //           varint(0) varint(0) [1+0=1 zero], varint(3)
+        // Values: 0, 0, 0, 5, 5, 8
+        let ref_doc = bson::doc! { "a": 0_i64 };
+
+        let mut delta_bytes = Vec::new();
+        delta_bytes.extend_from_slice(&encode_uvarint(0)); // zero marker
+        delta_bytes.extend_from_slice(&encode_uvarint(1)); // 1 more zero (2 total)
+        delta_bytes.extend_from_slice(&encode_uvarint(5)); // delta +5
+        delta_bytes.extend_from_slice(&encode_uvarint(0)); // zero marker
+        delta_bytes.extend_from_slice(&encode_uvarint(0)); // 0 more zeros (1 total)
+        delta_bytes.extend_from_slice(&encode_uvarint(3)); // delta +3
+
+        let data = build_test_chunk(&ref_doc, 1, 5, &delta_bytes);
+        let chunk = decode_chunk(&data).unwrap();
+
+        assert_eq!(chunk.metrics[0].values, vec![0, 0, 0, 5, 5, 8]);
+    }
+
+    #[test]
+    fn test_decode_chunk_multi_metric_zero_rle_alignment() {
+        // 3 metrics, 3 additional samples
+        // Metric a: deltas [0, 0, 0]
+        // Metric b: deltas [1, 2, 3]
+        // Metric c: deltas [10, 20, 30]
+        //
+        // Compressor processes column-major; zeros accumulate until non-zero:
+        //   a[0]=0 (count=1), a[1]=0 (count=2), a[2]=0 (count=3),
+        //   b[0]=1 → flush: varint(0) varint(2) [3-1=2], then varint(1)
+        //   b[1]=2 → varint(2), b[2]=3 → varint(3)
+        //   c[0]=10 → varint(10), c[1]=20 → varint(20), c[2]=30 → varint(30)
+        let ref_doc = bson::doc! { "a": 0_i64, "b": 0_i64, "c": 0_i64 };
+
+        let mut delta_bytes = Vec::new();
+        // 3 zeros for metric a: varint(0) varint(2) → 1 + 2 = 3
+        delta_bytes.extend_from_slice(&encode_uvarint(0));
+        delta_bytes.extend_from_slice(&encode_uvarint(2));
+        // Metric b: 1, 2, 3
+        delta_bytes.extend_from_slice(&encode_uvarint(1));
+        delta_bytes.extend_from_slice(&encode_uvarint(2));
+        delta_bytes.extend_from_slice(&encode_uvarint(3));
+        // Metric c: 10, 20, 30
+        delta_bytes.extend_from_slice(&encode_uvarint(10));
+        delta_bytes.extend_from_slice(&encode_uvarint(20));
+        delta_bytes.extend_from_slice(&encode_uvarint(30));
+
+        let data = build_test_chunk(&ref_doc, 3, 3, &delta_bytes);
+        let chunk = decode_chunk(&data).unwrap();
+
+        assert_eq!(chunk.metrics[0].values, vec![0, 0, 0, 0]);
+        assert_eq!(chunk.metrics[1].values, vec![0, 1, 3, 6]);
+        assert_eq!(chunk.metrics[2].values, vec![0, 10, 30, 60]);
+    }
+
+    #[test]
+    fn test_decode_chunk_zero_run_in_middle() {
+        // Reference: a=10, 6 additional samples
+        // Deltas: [1, 2, 0, 0, 0, 3]
+        // Encoding: varint(1), varint(2), varint(0) varint(2) [1+2=3 zeros], varint(3)
+        // Values: 10, 11, 13, 13, 13, 13, 16
+        let ref_doc = bson::doc! { "a": 10_i64 };
+
+        let mut delta_bytes = Vec::new();
+        delta_bytes.extend_from_slice(&encode_uvarint(1)); // +1
+        delta_bytes.extend_from_slice(&encode_uvarint(2)); // +2
+        delta_bytes.extend_from_slice(&encode_uvarint(0)); // zero marker
+        delta_bytes.extend_from_slice(&encode_uvarint(2)); // 2 more zeros (3 total)
+        delta_bytes.extend_from_slice(&encode_uvarint(3)); // +3
+
+        let data = build_test_chunk(&ref_doc, 1, 6, &delta_bytes);
+        let chunk = decode_chunk(&data).unwrap();
+
+        assert_eq!(chunk.metrics[0].values, vec![10, 11, 13, 13, 13, 13, 16]);
+    }
+
+    #[test]
+    fn test_decode_chunk_zero_rle_spans_metrics() {
+        // Critical test: zero run that spans across metric column boundaries.
+        // 2 metrics (a, b), 3 additional samples.
+        // Metric a: deltas [0, 0, 0]
+        // Metric b: deltas [0, 0, 5]
+        //
+        // Compressor accumulates 5 consecutive zeros across both columns,
+        // then flushes when it hits 5:
+        //   varint(0) varint(4) [1+4=5 zeros], varint(5)
+        //
+        // The zero run starts in metric a and bleeds into metric b.
+        let ref_doc = bson::doc! { "a": 0_i64, "b": 100_i64 };
+
+        let mut delta_bytes = Vec::new();
+        // 5 zeros spanning both metrics: varint(0) varint(4)
+        delta_bytes.extend_from_slice(&encode_uvarint(0));
+        delta_bytes.extend_from_slice(&encode_uvarint(4));
+        // Then the non-zero delta for b[2]
+        delta_bytes.extend_from_slice(&encode_uvarint(5));
+
+        let data = build_test_chunk(&ref_doc, 2, 3, &delta_bytes);
+        let chunk = decode_chunk(&data).unwrap();
+
+        // a: ref=0, deltas=[0,0,0] → [0, 0, 0, 0]
+        assert_eq!(chunk.metrics[0].values, vec![0, 0, 0, 0]);
+        // b: ref=100, deltas=[0,0,5] → [100, 100, 100, 105]
+        assert_eq!(chunk.metrics[1].values, vec![100, 100, 100, 105]);
     }
 }

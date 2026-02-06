@@ -211,17 +211,26 @@ async fn main() -> color_eyre::Result<()> {
     // Diagnostic dump mode: read twice with a delay, show what changed
     if cli.dump {
         // Show metric indices for key metrics
-        let key_names = ["start", "serverStatus.opcounters.insert", "serverStatus.opcounters.query",
-                         "serverStatus.opcounters.command", "serverStatus.uptimeMillis",
-                         "serverStatus.connections.current"];
+        let key_names = [
+            "start",
+            "serverStatus.opcounters.insert",
+            "serverStatus.opcounters.query",
+            "serverStatus.opcounters.command",
+            "serverStatus.uptimeMillis",
+            "serverStatus.connections.current",
+        ];
         if let Some(last_chunk) = result.chunks.last() {
             eprintln!("=== Metric indices (of {}) ===", last_chunk.metrics.len());
             for name in &key_names {
                 if let Some(idx) = last_chunk.metrics.iter().position(|m| m.path == *name) {
                     let m = &last_chunk.metrics[idx];
                     let has_nonzero = m.values.windows(2).any(|w| w[0] != w[1]);
-                    eprintln!("  [{idx}] {name} ref={} last={} changes={}",
-                        m.values[0], m.values[m.values.len()-1], has_nonzero);
+                    eprintln!(
+                        "  [{idx}] {name} ref={} last={} changes={}",
+                        m.values[0],
+                        m.values[m.values.len() - 1],
+                        has_nonzero
+                    );
                 }
             }
             // Show first few values of key metrics to verify delta alignment
@@ -234,7 +243,11 @@ async fn main() -> color_eyre::Result<()> {
                 }
             }
         }
-        eprintln!("=== Read 1: {} metrics, {} samples ===", app.metrics.len(), app.sample_count);
+        eprintln!(
+            "=== Read 1: {} metrics, {} samples ===",
+            app.metrics.len(),
+            app.sample_count
+        );
         for name in key_names {
             if let Some(m) = app.metrics.iter().find(|m| m.path == name) {
                 eprintln!("  {name} = {} (delta={:?})", m.current, m.delta());
@@ -244,15 +257,28 @@ async fn main() -> color_eyre::Result<()> {
         std::thread::sleep(Duration::from_secs(12));
         let result2 = load_all_chunks(&path);
         if let Some((metrics2, _, sc2)) = latest_sample(&result2.chunks) {
-            eprintln!("=== Read 2: {} metrics, {} samples ===", metrics2.len(), sc2);
-            for name in ["start", "serverStatus.opcounters.insert", "serverStatus.opcounters.query",
-                          "serverStatus.opcounters.command", "serverStatus.uptimeMillis",
-                          "serverStatus.connections.current"] {
+            eprintln!(
+                "=== Read 2: {} metrics, {} samples ===",
+                metrics2.len(),
+                sc2
+            );
+            for name in [
+                "start",
+                "serverStatus.opcounters.insert",
+                "serverStatus.opcounters.query",
+                "serverStatus.opcounters.command",
+                "serverStatus.uptimeMillis",
+                "serverStatus.connections.current",
+            ] {
                 if let Some(m) = metrics2.iter().find(|m| m.path == name) {
                     let old = app.metrics.iter().find(|o| o.path == name);
-                    let changed = old.map_or(false, |o| o.current != m.current);
-                    eprintln!("  {name} = {} (delta={:?}) {}", m.current, m.previous.map(|p| m.current.wrapping_sub(p)),
-                        if changed { "CHANGED" } else { "" });
+                    let changed = old.is_some_and(|o| o.current != m.current);
+                    eprintln!(
+                        "  {name} = {} (delta={:?}) {}",
+                        m.current,
+                        m.previous.map(|p| m.current.wrapping_sub(p)),
+                        if changed { "CHANGED" } else { "" }
+                    );
                 }
             }
         } else {

@@ -131,6 +131,27 @@ Event loop: tokio async with separate tick (1s, advance sample) and render (100m
 - [ ] TUI snapshot tests: use ratatui `TestBackend` for rendered output assertions
 - [ ] File watcher: use `notify` crate to detect new/rotated FTDC files instead of polling
 
+## Testing with Live FTDC Data
+
+The test data in `test-data/diagnostic.data/` is **static** — no live mongod writes to it. To test with real, continuously-updating FTDC data:
+
+```bash
+# Start a temporary mongod with a CRUD workload (120s duration)
+./scripts/generate_load.sh -d 120 /Users/ali/dev/mongodb/bin
+
+# Script output will show the dbpath, e.g.:
+#   dbpath: /tmp/mongo-ftdc-XXXXXX
+# Use that path's diagnostic.data/ directory:
+./target/release/mmx /tmp/mongo-ftdc-XXXXXX/diagnostic.data/
+```
+
+**Important notes:**
+- The binary name is `mmx` (NOT `mmx-tui`) — see `[[bin]]` in `crates/mmx-tui/Cargo.toml`
+- The script requires `mongod` and `mongosh` in the provided bin directory
+- FTDC interim file is rewritten by mongod every ~10 seconds with accumulated samples
+- Use `--dump` flag for non-TUI diagnostic output: `./target/release/mmx --dump <path>`
+- The script runs in foreground; use `&` or a separate terminal
+
 ## Known Bugs
 
-(none currently)
+- **Delta stream decoding truncation**: The FTDC delta stream (column-major varint deltas with zero-RLE) is consumed entirely by the first ~770 metrics out of ~5211. `serverStatus.*` metrics (starting at index ~1969) get zero deltas and appear frozen at reference values. Root cause: the decoder over-consumes bytes for early metric columns, starving later columns. This is why the TUI shows unchanging values for key metrics like `opcounters`, `uptimeMillis`, and `connections`.

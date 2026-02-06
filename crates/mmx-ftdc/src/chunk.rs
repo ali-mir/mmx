@@ -61,7 +61,26 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
     let sample_count =
         u32::from_le_bytes([remaining[4], remaining[5], remaining[6], remaining[7]]) as usize;
 
+    // Verify BSON doc size matches cursor position
+    let bson_doc_size = u32::from_le_bytes([
+        decompressed[0], decompressed[1], decompressed[2], decompressed[3],
+    ]) as usize;
+    eprintln!(
+        "FTDC chunk: bson_doc_size={bson_doc_size} cursor_after_doc={pos} \
+         metric_count={metric_count} sample_count={sample_count} \
+         decompressed_len={} delta_bytes={}",
+        decompressed.len(),
+        decompressed.len() - pos - 8
+    );
+    if bson_doc_size != pos {
+        eprintln!("  WARNING: BSON doc size mismatch! doc says {} but cursor at {}", bson_doc_size, pos);
+    }
+
     cursor.set_position((pos + 8) as u64);
+
+    // Show top-level keys to verify BSON key order
+    let top_keys: Vec<&str> = ref_doc.keys().map(|k| k.as_str()).collect();
+    eprintln!("  top_keys={:?}", &top_keys[..top_keys.len().min(10)]);
 
     // Flatten reference doc to get metric names and reference values
     let ref_metrics: Vec<FlatMetric> = flatten_bson(&ref_doc);
@@ -86,7 +105,16 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
 
     // Decode delta stream (column-major with zero-RLE).
     // When the stream ends early, remaining deltas are implicitly zero.
+    let delta_stream_start = cursor.position() as usize;
+    let delta_stream_len = decompressed.len() - delta_stream_start;
     let deltas = decode_deltas(&mut cursor, metric_count, sample_count);
+    let bytes_consumed = cursor.position() as usize - delta_stream_start;
+    if bytes_consumed < delta_stream_len {
+        eprintln!(
+            "FTDC: delta stream {bytes_consumed}/{delta_stream_len} bytes consumed ({} unused)",
+            delta_stream_len - bytes_consumed
+        );
+    }
 
     // Apply cumulative sum from reference values to build actual values
     let metrics = ref_metrics
@@ -122,11 +150,17 @@ fn decode_deltas(
 ) -> Vec<Vec<i64>> {
     let mut deltas = vec![vec![0i64; sample_count]; metric_count];
 
-    for metric_deltas in &mut deltas {
+    for (metric_idx, metric_deltas) in deltas.iter_mut().enumerate() {
         let mut sample_idx = 0;
         while sample_idx < sample_count {
             let Ok(raw) = read_uvarint(cursor) else {
                 // Stream exhausted — remaining deltas are implicitly zero
+                if metric_idx < metric_count - 1 {
+                    eprintln!(
+                        "FTDC: delta stream ended at metric {}/{} sample {}/{}",
+                        metric_idx, metric_count, sample_idx, sample_count
+                    );
+                }
                 return deltas;
             };
             if raw == 0 {

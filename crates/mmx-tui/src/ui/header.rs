@@ -41,8 +41,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     if let Some(epoch_ms) = app.sample_epoch_ms {
         let age_secs = (now_ms - epoch_ms) / 1000;
+        let samples = app.sample_count;
         spans.push(Span::styled(
-            format!("| data: {age_secs}s ago "),
+            format!("| {samples} samples | data: {age_secs}s ago "),
             theme::HEADER_STYLE,
         ));
     }

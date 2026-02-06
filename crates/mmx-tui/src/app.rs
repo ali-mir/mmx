@@ -63,6 +63,7 @@ pub struct App {
     pub focus: Focus,
     pub file_path: String,
     pub sample_epoch_ms: Option<i64>,
+    pub sample_count: usize,
     pub tick_count: usize,
     pub should_quit: bool,
 }
@@ -81,6 +82,7 @@ impl App {
             focus: Focus::Main,
             file_path,
             sample_epoch_ms: None,
+            sample_count: 0,
             tick_count: 0,
 
             should_quit: false,

@@ -30,11 +30,15 @@ use mmx_ftdc::reader;
 struct Cli {
     /// Path to FTDC file or directory containing FTDC files
     path: PathBuf,
+
+    /// Dump diagnostic info and exit (no TUI)
+    #[arg(long)]
+    dump: bool,
 }
 
 /// Extract the latest sample from all FTDC chunks as MetricEntry list.
-/// Returns (metrics, timestamp_epoch_ms).
-fn latest_sample(chunks: &[DecodedChunk]) -> Option<(Vec<MetricEntry>, Option<i64>)> {
+/// Returns (metrics, timestamp_epoch_ms, sample_count).
+fn latest_sample(chunks: &[DecodedChunk]) -> Option<(Vec<MetricEntry>, Option<i64>, usize)> {
     let last = chunks.last()?;
     if last.metrics.is_empty() {
         return None;
@@ -72,7 +76,7 @@ fn latest_sample(chunks: &[DecodedChunk]) -> Option<(Vec<MetricEntry>, Option<i6
         })
         .collect();
 
-    Some((metrics, timestamp))
+    Some((metrics, timestamp, num_samples))
 }
 
 /// Diagnostic info from a load attempt.
@@ -195,11 +199,66 @@ async fn main() -> color_eyre::Result<()> {
     // Load initial data
     let result = load_all_chunks(&path);
     writeln!(log, "tick:0 {}", result.info)?;
-    if let Some((metrics, ts)) = latest_sample(&result.chunks) {
+    if let Some((metrics, ts, sample_count)) = latest_sample(&result.chunks) {
         if let Some(epoch_ms) = ts {
             app.sample_epoch_ms = Some(epoch_ms);
         }
+        app.sample_count = sample_count;
         app.update(Message::UpdateMetrics(metrics));
+    }
+    log.flush()?;
+
+    // Diagnostic dump mode: read twice with a delay, show what changed
+    if cli.dump {
+        // Show metric indices for key metrics
+        let key_names = ["start", "serverStatus.opcounters.insert", "serverStatus.opcounters.query",
+                         "serverStatus.opcounters.command", "serverStatus.uptimeMillis",
+                         "serverStatus.connections.current"];
+        if let Some(last_chunk) = result.chunks.last() {
+            eprintln!("=== Metric indices (of {}) ===", last_chunk.metrics.len());
+            for name in &key_names {
+                if let Some(idx) = last_chunk.metrics.iter().position(|m| m.path == *name) {
+                    let m = &last_chunk.metrics[idx];
+                    let has_nonzero = m.values.windows(2).any(|w| w[0] != w[1]);
+                    eprintln!("  [{idx}] {name} ref={} last={} changes={}",
+                        m.values[0], m.values[m.values.len()-1], has_nonzero);
+                }
+            }
+            // Show first few values of key metrics to verify delta alignment
+            for idx in [0, 1, 769, 1972] {
+                if idx < last_chunk.metrics.len() {
+                    let m = &last_chunk.metrics[idx];
+                    let first5: Vec<i64> = m.values.iter().take(5).copied().collect();
+                    let last3: Vec<i64> = m.values.iter().rev().take(3).rev().copied().collect();
+                    eprintln!("  [{idx}] {} first5={first5:?} last3={last3:?}", m.path);
+                }
+            }
+        }
+        eprintln!("=== Read 1: {} metrics, {} samples ===", app.metrics.len(), app.sample_count);
+        for name in key_names {
+            if let Some(m) = app.metrics.iter().find(|m| m.path == name) {
+                eprintln!("  {name} = {} (delta={:?})", m.current, m.delta());
+            }
+        }
+        eprintln!("Waiting 12 seconds for interim file update...");
+        std::thread::sleep(Duration::from_secs(12));
+        let result2 = load_all_chunks(&path);
+        if let Some((metrics2, _, sc2)) = latest_sample(&result2.chunks) {
+            eprintln!("=== Read 2: {} metrics, {} samples ===", metrics2.len(), sc2);
+            for name in ["start", "serverStatus.opcounters.insert", "serverStatus.opcounters.query",
+                          "serverStatus.opcounters.command", "serverStatus.uptimeMillis",
+                          "serverStatus.connections.current"] {
+                if let Some(m) = metrics2.iter().find(|m| m.path == name) {
+                    let old = app.metrics.iter().find(|o| o.path == name);
+                    let changed = old.map_or(false, |o| o.current != m.current);
+                    eprintln!("  {name} = {} (delta={:?}) {}", m.current, m.previous.map(|p| m.current.wrapping_sub(p)),
+                        if changed { "CHANGED" } else { "" });
+                }
+            }
+        } else {
+            eprintln!("No data on second read!");
+        }
+        return Ok(());
     }
 
     // Set up terminal
@@ -239,12 +298,12 @@ async fn main() -> color_eyre::Result<()> {
                 // Re-read FTDC files from disk to pick up new data
                 let result = load_all_chunks(&path);
                 let mut tick_log = format!("tick:{} {}", app.tick_count, result.info);
-                if let Some((metrics, ts)) = latest_sample(&result.chunks) {
+                if let Some((metrics, ts, sample_count)) = latest_sample(&result.chunks) {
                     if let Some(epoch_ms) = ts {
                         tick_log.push_str(&format!(" | ts={epoch_ms}"));
                         app.sample_epoch_ms = Some(epoch_ms);
                     }
-                    tick_log.push_str(&format!(" | metrics={}", metrics.len()));
+                    app.sample_count = sample_count;
                     app.update(Message::UpdateMetrics(metrics));
                 } else {
                     tick_log.push_str(" | no-sample");

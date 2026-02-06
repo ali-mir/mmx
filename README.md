@@ -108,6 +108,49 @@ Metric values are formatted based on path heuristics:
 - Duration metrics (`*millis*`, `*micros*`) → `1.5s`, `500ms`
 - Counters → `1.5M`, `10.0K`
 
+## Generating Test Data
+
+If you don't have local FTDC files, the `scripts/` directory can spin up a
+temporary mongod, run a workload against it, and copy the resulting FTDC data into `test-data/`.
+
+**Requirements:** A local MongoDB build (or install) with `mongod` and `mongosh` binaries.
+
+```bash
+# Basic — runs a default 60s workload with 8 parallel workers
+./scripts/generate_load.sh /path/to/mongo/bin
+
+# shorter run
+./scripts/generate_load.sh -d 30 /path/to/mongo/bin
+
+# heavier workload — 2 min, 16 parallel workers, 1KB docs
+./scripts/generate_load.sh -d 120 -w 16 -s 1024 /path/to/mongo/bin
+
+# use a different port (if 27017 is taken)
+./scripts/generate_load.sh -p 27018 /path/to/mongo/bin
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-d`, `--duration` | `60` | Workload duration in seconds |
+| `-w`, `--workers` | `8` | Concurrent worker threads |
+| `-s`, `--doc-size` | `512` | Approximate document payload size in bytes |
+| `-p`, `--port` | `27017` | mongod listen port |
+
+The script (`generate_load.sh`) handles the full lifecycle automatically:
+
+1. Starts a temporary `mongod` with a replica set in a temp directory
+2. Runs `workload.js` via `mongosh` — a randomized CRUD workload (inserts,
+   finds, updates, deletes) with configurable concurrency, duration, and
+   document size
+3. Copies the resulting `diagnostic.data/` directory into `test-data/`
+4. Shuts down and cleans up the mongod on exit (including on Ctrl+C)
+
+The FTDC files land in `test-data/diagnostic.data/` and can be viewed with:
+
+```bash
+cargo run -- test-data/diagnostic.data
+```
+
 ## Development
 
 ```bash

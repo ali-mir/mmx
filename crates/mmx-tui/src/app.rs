@@ -82,6 +82,7 @@ impl App {
             file_path,
             sample_timestamp: String::new(),
             tick_count: 0,
+
             should_quit: false,
         }
     }

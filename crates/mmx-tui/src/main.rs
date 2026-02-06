@@ -5,6 +5,7 @@ mod theme;
 mod ui;
 
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -74,46 +75,94 @@ fn latest_sample(chunks: &[DecodedChunk]) -> Option<(Vec<MetricEntry>, Option<i6
     Some((metrics, timestamp))
 }
 
-/// Try to read an FTDC file into chunks. Returns empty vec on failure.
-fn try_read_ftdc_file(path: &std::path::Path) -> Vec<DecodedChunk> {
+/// Diagnostic info from a load attempt.
+struct LoadResult {
+    chunks: Vec<DecodedChunk>,
+    info: String,
+}
+
+/// Try to read an FTDC file. Returns (chunks, error_message).
+fn try_read_ftdc_file(path: &std::path::Path) -> (Vec<DecodedChunk>, Option<String>) {
     let data = match std::fs::read(path) {
         Ok(d) => d,
-        Err(_) => return Vec::new(),
+        Err(e) => return (Vec::new(), Some(format!("read: {e}"))),
     };
+    let file_len = data.len();
+
+    // Check BSON doc completeness
+    if data.len() < 4 {
+        return (Vec::new(), Some(format!("{file_len}B too small")));
+    }
+    let doc_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if file_len < doc_size {
+        return (Vec::new(), Some(format!("{file_len}B < {doc_size}B bson")));
+    }
+
     let cursor = io::Cursor::new(data);
-    reader::read_ftdc_file(cursor).unwrap_or_default()
+    match reader::read_ftdc_file(cursor) {
+        Ok(chunks) if chunks.is_empty() => (Vec::new(), Some(format!("{file_len}B, 0 chunks"))),
+        Ok(chunks) => (chunks, None),
+        Err(e) => (Vec::new(), Some(format!("{e}"))),
+    }
 }
 
 /// Load all FTDC chunks. Retries the interim file (the live data source)
 /// a few times since it's being actively rewritten by mongod every second.
-fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChunk>> {
-    let files = reader::find_ftdc_files(path)?;
+fn load_all_chunks(path: &std::path::Path) -> LoadResult {
+    let files = match reader::find_ftdc_files(path) {
+        Ok(f) => f,
+        Err(e) => {
+            return LoadResult {
+                chunks: Vec::new(),
+                info: format!("find: {e}"),
+            };
+        }
+    };
+
     let mut all_chunks: Vec<DecodedChunk> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
 
     for file_path in &files {
-        let is_interim = file_path
+        let name = file_path
             .file_name()
-            .is_some_and(|n| n.to_string_lossy().contains("interim"));
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let is_interim = name.contains("interim");
 
         if is_interim {
-            // Retry interim file — it's rewritten every second by mongod
-            // and we may catch it mid-write. Try a few times with short delays.
             for attempt in 0..5 {
-                let chunks = try_read_ftdc_file(file_path);
+                let (chunks, err) = try_read_ftdc_file(file_path);
                 if !chunks.is_empty() {
+                    let n = chunks.len();
+                    parts.push(format!("interim: {n}ch@try{attempt}"));
                     all_chunks.extend(chunks);
                     break;
                 }
                 if attempt < 4 {
                     std::thread::sleep(Duration::from_millis(50));
                 }
+                if attempt == 4 {
+                    let reason = err.unwrap_or_else(|| "unknown".into());
+                    parts.push(format!("interim: fail({reason})"));
+                }
             }
         } else {
-            all_chunks.extend(try_read_ftdc_file(file_path));
+            let (chunks, err) = try_read_ftdc_file(file_path);
+            let n = chunks.len();
+            if n > 0 {
+                parts.push(format!("{name}: {n}ch"));
+            } else {
+                let reason = err.unwrap_or_else(|| "0 chunks".into());
+                parts.push(format!("{name}: {reason}"));
+            }
+            all_chunks.extend(chunks);
         }
     }
 
-    Ok(all_chunks)
+    LoadResult {
+        chunks: all_chunks,
+        info: parts.join(" | "),
+    }
 }
 
 /// Format an epoch-ms timestamp as a human-readable local time string.
@@ -164,9 +213,13 @@ async fn main() -> color_eyre::Result<()> {
 
     let mut app = App::new(path.display().to_string());
 
+    // Open debug log
+    let mut log = std::fs::File::create("mmx-debug.log")?;
+
     // Load initial data
-    let chunks = load_all_chunks(&path)?;
-    if let Some((metrics, ts)) = latest_sample(&chunks) {
+    let result = load_all_chunks(&path);
+    writeln!(log, "tick:0 {}", result.info)?;
+    if let Some((metrics, ts)) = latest_sample(&result.chunks) {
         if let Some(epoch_ms) = ts {
             app.sample_timestamp = format_sample_timestamp(epoch_ms);
         }
@@ -208,13 +261,14 @@ async fn main() -> color_eyre::Result<()> {
             Event::Tick => {
                 app.tick_count += 1;
                 // Re-read FTDC files from disk to pick up new data
-                if let Ok(chunks) = load_all_chunks(&path) {
-                    if let Some((metrics, ts)) = latest_sample(&chunks) {
-                        if let Some(epoch_ms) = ts {
-                            app.sample_timestamp = format_sample_timestamp(epoch_ms);
-                        }
-                        app.update(Message::UpdateMetrics(metrics));
+                let result = load_all_chunks(&path);
+                let _ = writeln!(log, "tick:{} {}", app.tick_count, result.info);
+                let _ = log.flush();
+                if let Some((metrics, ts)) = latest_sample(&result.chunks) {
+                    if let Some(epoch_ms) = ts {
+                        app.sample_timestamp = format_sample_timestamp(epoch_ms);
                     }
+                    app.update(Message::UpdateMetrics(metrics));
                 }
             }
             Event::Key(key) => {

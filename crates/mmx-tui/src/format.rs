@@ -130,7 +130,7 @@ fn format_epoch_ms(value: i64) -> String {
     }
 }
 
-fn days_to_ymd(days: i64) -> (i64, i64, i64) {
+pub fn days_to_ymd(days: i64) -> (i64, i64, i64) {
     // Civil days-from-epoch to (y, m, d) — Howard Hinnant's algorithm
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

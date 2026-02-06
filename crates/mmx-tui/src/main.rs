@@ -90,8 +90,14 @@ impl Timeline {
         self.samples.len()
     }
 
+    /// Index of the "start" metric (epoch-ms timestamp per sample).
+    fn start_index(&self) -> Option<usize> {
+        self.paths.iter().position(|p| p == "start")
+    }
+
     /// Get the current sample as MetricEntry list, then advance the cursor.
-    fn next_sample(&mut self) -> Option<Vec<MetricEntry>> {
+    /// Returns (metrics, timestamp_epoch_ms).
+    fn next_sample(&mut self) -> Option<(Vec<MetricEntry>, Option<i64>)> {
         if self.samples.is_empty() {
             return None;
         }
@@ -101,6 +107,8 @@ impl Timeline {
 
         let current_values = &self.samples[current_idx];
         let prev_values = prev_idx.map(|i| &self.samples[i]);
+
+        let timestamp = self.start_index().map(|i| current_values[i]);
 
         let metrics = self
             .paths
@@ -121,7 +129,7 @@ impl Timeline {
         // Advance cursor, wrapping to start for replay
         self.cursor = (self.cursor + 1) % self.samples.len();
 
-        Some(metrics)
+        Some((metrics, timestamp))
     }
 }
 
@@ -139,17 +147,17 @@ async fn main() -> color_eyre::Result<()> {
 
     // Load all FTDC chunks
     let all_chunks = load_all_chunks(&path)?;
-    let total_chunks = all_chunks.len();
-
     let mut timeline = Timeline::from_chunks(&all_chunks);
     let total_samples = timeline.total_samples();
 
     let mut app = App::new(path.display().to_string());
-    app.total_chunks = total_chunks;
-    app.sample_time = format!("sample 1/{total_samples}");
+    app.sample_position = format!("sample 1/{total_samples}");
 
     // Load first sample
-    if let Some(metrics) = timeline.next_sample() {
+    if let Some((metrics, ts)) = timeline.next_sample() {
+        if let Some(epoch_ms) = ts {
+            app.sample_timestamp = format_sample_timestamp(epoch_ms);
+        }
         app.update(Message::UpdateMetrics(metrics));
     }
 
@@ -187,8 +195,11 @@ async fn main() -> color_eyre::Result<()> {
             }
             Event::Tick => {
                 // Advance to next sample in the timeline
-                if let Some(metrics) = timeline.next_sample() {
-                    app.sample_time = format!("sample {}/{total_samples}", timeline.cursor);
+                if let Some((metrics, ts)) = timeline.next_sample() {
+                    app.sample_position = format!("sample {}/{total_samples}", timeline.cursor);
+                    if let Some(epoch_ms) = ts {
+                        app.sample_timestamp = format_sample_timestamp(epoch_ms);
+                    }
                     app.update(Message::UpdateMetrics(metrics));
                 }
             }
@@ -252,6 +263,39 @@ async fn main() -> color_eyre::Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+fn format_sample_timestamp(epoch_ms: i64) -> String {
+    let secs = epoch_ms / 1_000;
+    let time_of_day = secs.rem_euclid(86_400);
+    let hour24 = time_of_day / 3_600;
+    let minute = (time_of_day % 3_600) / 60;
+
+    let (hour12, ampm) = match hour24 {
+        0 => (12, "am"),
+        1..=11 => (hour24, "am"),
+        12 => (12, "pm"),
+        _ => (hour24 - 12, "pm"),
+    };
+
+    let days_since_epoch = secs.div_euclid(86_400);
+    // Day of week: 1970-01-01 was Thursday (4)
+    let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
+    let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow as usize];
+
+    let (year, month, day) = format::days_to_ymd(days_since_epoch);
+    let month_name = [
+        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][month as usize];
+
+    let ordinal = match day {
+        1 | 21 | 31 => "st",
+        2 | 22 => "nd",
+        3 | 23 => "rd",
+        _ => "th",
+    };
+
+    format!("{hour12}:{minute:02}{ampm}, {day_name} {month_name} {day}{ordinal} {year}")
 }
 
 fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChunk>> {

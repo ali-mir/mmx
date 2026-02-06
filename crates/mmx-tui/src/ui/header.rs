@@ -14,19 +14,22 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let metric_count = app.metrics.len();
-    let chunk_info = format!("{metric_count} metrics | {} chunks", app.total_chunks);
-    let sample_info = if app.sample_time.is_empty() {
-        String::new()
-    } else {
-        format!(" | {}", app.sample_time)
-    };
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" mmx ", theme::HEADER_BOLD),
-        Span::styled(format!("| {file_display} "), theme::HEADER_STYLE),
-        Span::styled(format!("| {chunk_info}{sample_info} "), theme::HEADER_STYLE),
-    ]);
+        Span::styled(
+            format!("| {file_display} | {metric_count} metrics "),
+            theme::HEADER_STYLE,
+        ),
+    ];
 
-    let paragraph = Paragraph::new(line).style(theme::HEADER_STYLE);
+    if !app.sample_timestamp.is_empty() {
+        spans.push(Span::styled(
+            format!("| {} ", app.sample_timestamp),
+            theme::HEADER_STYLE,
+        ));
+    }
+
+    let paragraph = Paragraph::new(Line::from(spans)).style(theme::HEADER_STYLE);
     f.render_widget(paragraph, area);
 }

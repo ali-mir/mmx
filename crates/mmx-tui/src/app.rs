@@ -62,9 +62,9 @@ pub struct App {
     pub mode: AppMode,
     pub focus: Focus,
     pub file_path: String,
-    pub sample_time: String,
+    pub sample_position: String,
+    pub sample_timestamp: String,
     pub should_quit: bool,
-    pub total_chunks: usize,
 }
 
 impl App {
@@ -80,9 +80,9 @@ impl App {
             mode: AppMode::Normal,
             focus: Focus::Main,
             file_path,
-            sample_time: String::new(),
+            sample_position: String::new(),
+            sample_timestamp: String::new(),
             should_quit: false,
-            total_chunks: 0,
         }
     }
 

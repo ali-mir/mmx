@@ -1,4 +1,4 @@
-# mmx — MongoMetrics
+# mmx — mongometrics
 
 An htop-like TUI for exploring MongoDB FTDC (Full Time Diagnostic Data Capture) files.
 

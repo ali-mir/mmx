@@ -25,7 +25,7 @@ use mmx_ftdc::reader;
 #[derive(Parser, Debug)]
 #[command(
     name = "mmx",
-    about = "MongoMetrics - htop-like TUI for MongoDB FTDC data"
+    about = "mongometrics - terminal ui for mongod FTDC metrics"
 )]
 struct Cli {
     /// Path to FTDC file or directory containing FTDC files

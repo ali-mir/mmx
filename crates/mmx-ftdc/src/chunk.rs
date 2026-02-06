@@ -85,39 +85,25 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
     }
 
     // Decode delta stream (column-major with zero-RLE)
-    // For each metric, decode `sample_count` deltas
-    let mut deltas = vec![vec![0i64; sample_count]; metric_count];
-
-    for metric_deltas in &mut deltas {
-        let mut sample_idx = 0;
-        while sample_idx < sample_count {
-            let raw = read_uvarint(&mut cursor).map_err(ChunkError::Varint)?;
-            if raw == 0 {
-                // Zero-RLE: next varint is the count of additional zeros
-                let zero_count = read_uvarint(&mut cursor).map_err(ChunkError::Varint)? as usize;
-                // The initial zero plus zero_count more zeros
-                // (current sample is already 0, skip zero_count more)
-                sample_idx += 1 + zero_count;
-            } else {
-                // Zig-zag decode: unsigned -> signed
-                metric_deltas[sample_idx] = zigzag_decode(raw);
-                sample_idx += 1;
-            }
-        }
-    }
+    // For each metric, decode `sample_count` deltas.
+    // If the stream is truncated (e.g. partial interim file), fall back
+    // to returning just the reference values.
+    let deltas = decode_deltas(&mut cursor, metric_count, sample_count);
 
     // Apply cumulative sum from reference values to build actual values
     let metrics = ref_metrics
         .into_iter()
-        .zip(deltas)
-        .map(|(ref_metric, sample_deltas)| {
+        .enumerate()
+        .map(|(i, ref_metric)| {
             let mut values = Vec::with_capacity(1 + sample_count);
             values.push(ref_metric.value); // reference (sample 0)
 
-            let mut current = ref_metric.value;
-            for delta in sample_deltas {
-                current = current.wrapping_add(delta);
-                values.push(current);
+            if let Some(all_deltas) = &deltas {
+                let mut current = ref_metric.value;
+                for &delta in &all_deltas[i] {
+                    current = current.wrapping_add(delta);
+                    values.push(current);
+                }
             }
 
             MetricSeries {
@@ -128,6 +114,31 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
         .collect();
 
     Ok(DecodedChunk { metrics })
+}
+
+/// Decode the varint delta stream. Returns None if the stream is truncated.
+fn decode_deltas(
+    cursor: &mut Cursor<&Vec<u8>>,
+    metric_count: usize,
+    sample_count: usize,
+) -> Option<Vec<Vec<i64>>> {
+    let mut deltas = vec![vec![0i64; sample_count]; metric_count];
+
+    for metric_deltas in &mut deltas {
+        let mut sample_idx = 0;
+        while sample_idx < sample_count {
+            let raw = read_uvarint(cursor).ok()?;
+            if raw == 0 {
+                let zero_count = read_uvarint(cursor).ok()? as usize;
+                sample_idx += 1 + zero_count;
+            } else {
+                metric_deltas[sample_idx] = zigzag_decode(raw);
+                sample_idx += 1;
+            }
+        }
+    }
+
+    Some(deltas)
 }
 
 /// Zig-zag decode: maps unsigned to signed.

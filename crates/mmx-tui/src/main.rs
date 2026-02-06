@@ -31,108 +31,97 @@ struct Cli {
     path: PathBuf,
 }
 
-/// Flattened timeline: one entry per sample across all chunks.
-/// Each entry is a Vec of (path, value) for every metric at that point in time.
-struct Timeline {
-    /// Metric paths (same order for every sample).
-    paths: Vec<String>,
-    /// samples[i][j] = value of metric j at sample i.
-    samples: Vec<Vec<i64>>,
-    /// Current playback position.
-    cursor: usize,
+/// Extract the latest sample from all FTDC chunks as MetricEntry list.
+/// Returns (metrics, timestamp_epoch_ms).
+fn latest_sample(chunks: &[DecodedChunk]) -> Option<(Vec<MetricEntry>, Option<i64>)> {
+    let last = chunks.last()?;
+    if last.metrics.is_empty() {
+        return None;
+    }
+
+    let num_samples = last.metrics[0].values.len();
+    if num_samples == 0 {
+        return None;
+    }
+
+    let last_idx = num_samples - 1;
+    let prev_idx = if num_samples >= 2 {
+        Some(num_samples - 2)
+    } else {
+        None
+    };
+
+    let mut timestamp = None;
+
+    let metrics = last
+        .metrics
+        .iter()
+        .map(|m| {
+            let current = m.values[last_idx];
+            let previous = prev_idx.map(|i| m.values[i]);
+            if m.path == "start" {
+                timestamp = Some(current);
+            }
+            MetricEntry {
+                path: m.path.clone(),
+                current,
+                previous,
+                history: Vec::new(),
+            }
+        })
+        .collect();
+
+    Some((metrics, timestamp))
 }
 
-impl Timeline {
-    fn from_chunks(chunks: &[DecodedChunk]) -> Self {
-        if chunks.is_empty() {
-            return Timeline {
-                paths: Vec::new(),
-                samples: Vec::new(),
-                cursor: 0,
-            };
-        }
+fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChunk>> {
+    let files = reader::find_ftdc_files(path)?;
+    let mut all_chunks: Vec<DecodedChunk> = Vec::new();
 
-        // Use the first chunk's metrics as the canonical path list
-        let paths: Vec<String> = chunks
-            .last()
-            .unwrap()
-            .metrics
-            .iter()
-            .map(|m| m.path.clone())
-            .collect();
-
-        let mut samples: Vec<Vec<i64>> = Vec::new();
-
-        for chunk in chunks {
-            if chunk.metrics.is_empty() {
-                continue;
-            }
-            let num_samples = chunk.metrics[0].values.len();
-
-            for sample_idx in 0..num_samples {
-                let sample: Vec<i64> = chunk
-                    .metrics
-                    .iter()
-                    .map(|m| m.values.get(sample_idx).copied().unwrap_or(0))
-                    .collect();
-                samples.push(sample);
-            }
-        }
-
-        Timeline {
-            paths,
-            samples,
-            cursor: 0,
+    for file_path in &files {
+        let file = std::fs::File::open(file_path)?;
+        let reader = std::io::BufReader::new(file);
+        match reader::read_ftdc_file(reader) {
+            Ok(chunks) => all_chunks.extend(chunks),
+            Err(_) => continue,
         }
     }
 
-    fn total_samples(&self) -> usize {
-        self.samples.len()
-    }
+    Ok(all_chunks)
+}
 
-    /// Index of the "start" metric (epoch-ms timestamp per sample).
-    fn start_index(&self) -> Option<usize> {
-        self.paths.iter().position(|p| p == "start")
-    }
+fn format_sample_timestamp(epoch_ms: i64) -> String {
+    let secs = epoch_ms / 1_000;
+    let time_of_day = secs.rem_euclid(86_400);
+    let hour24 = time_of_day / 3_600;
+    let minute = (time_of_day % 3_600) / 60;
+    let second = time_of_day % 60;
 
-    /// Get the current sample as MetricEntry list, then advance the cursor.
-    /// Returns (metrics, timestamp_epoch_ms).
-    fn next_sample(&mut self) -> Option<(Vec<MetricEntry>, Option<i64>)> {
-        if self.samples.is_empty() {
-            return None;
-        }
+    let (hour12, ampm) = match hour24 {
+        0 => (12, "am"),
+        1..=11 => (hour24, "am"),
+        12 => (12, "pm"),
+        _ => (hour24 - 12, "pm"),
+    };
 
-        let current_idx = self.cursor;
-        let prev_idx = current_idx.checked_sub(1);
+    let days_since_epoch = secs.div_euclid(86_400);
+    // Day of week: 1970-01-01 was Thursday (4)
+    let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
+    let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow as usize];
 
-        let current_values = &self.samples[current_idx];
-        let prev_values = prev_idx.map(|i| &self.samples[i]);
+    let (year, month, day) = format::days_to_ymd(days_since_epoch);
+    let month_name = [
+        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][month as usize];
 
-        let timestamp = self
-            .start_index()
-            .and_then(|i| current_values.get(i).copied());
+    let ordinal = match day {
+        1 | 21 | 31 => "st",
+        2 | 22 => "nd",
+        3 | 23 => "rd",
+        _ => "th",
+    };
 
-        let metrics = self
-            .paths
-            .iter()
-            .enumerate()
-            .map(|(j, path)| {
-                let current = current_values.get(j).copied().unwrap_or(0);
-                let previous = prev_values.and_then(|pv| pv.get(j).copied());
-                MetricEntry {
-                    path: path.clone(),
-                    current,
-                    previous,
-                    history: Vec::new(), // History tracked by App
-                }
-            })
-            .collect();
-
-        // Advance cursor, wrapping to start for replay
-        self.cursor = (self.cursor + 1) % self.samples.len();
-
-        Some((metrics, timestamp))
-    }
+    format!("{hour12}:{minute:02}:{second:02}{ampm}, {day_name} {month_name} {day}{ordinal} {year}")
 }
 
 #[tokio::main]
@@ -147,16 +136,11 @@ async fn main() -> color_eyre::Result<()> {
         std::process::exit(1);
     }
 
-    // Load all FTDC chunks
-    let all_chunks = load_all_chunks(&path)?;
-    let mut timeline = Timeline::from_chunks(&all_chunks);
-    let total_samples = timeline.total_samples();
-
     let mut app = App::new(path.display().to_string());
-    app.sample_position = format!("sample 1/{total_samples}");
 
-    // Load first sample
-    if let Some((metrics, ts)) = timeline.next_sample() {
+    // Load initial data
+    let chunks = load_all_chunks(&path)?;
+    if let Some((metrics, ts)) = latest_sample(&chunks) {
         if let Some(epoch_ms) = ts {
             app.sample_timestamp = format_sample_timestamp(epoch_ms);
         }
@@ -196,13 +180,14 @@ async fn main() -> color_eyre::Result<()> {
                 terminal.draw(|f| ui::render(f, &mut app))?;
             }
             Event::Tick => {
-                // Advance to next sample in the timeline
-                if let Some((metrics, ts)) = timeline.next_sample() {
-                    app.sample_position = format!("sample {}/{total_samples}", timeline.cursor);
-                    if let Some(epoch_ms) = ts {
-                        app.sample_timestamp = format_sample_timestamp(epoch_ms);
+                // Re-read FTDC files from disk to pick up new data
+                if let Ok(chunks) = load_all_chunks(&path) {
+                    if let Some((metrics, ts)) = latest_sample(&chunks) {
+                        if let Some(epoch_ms) = ts {
+                            app.sample_timestamp = format_sample_timestamp(epoch_ms);
+                        }
+                        app.update(Message::UpdateMetrics(metrics));
                     }
-                    app.update(Message::UpdateMetrics(metrics));
                 }
             }
             Event::Key(key) => {
@@ -265,53 +250,4 @@ async fn main() -> color_eyre::Result<()> {
     terminal.show_cursor()?;
 
     Ok(())
-}
-
-fn format_sample_timestamp(epoch_ms: i64) -> String {
-    let secs = epoch_ms / 1_000;
-    let time_of_day = secs.rem_euclid(86_400);
-    let hour24 = time_of_day / 3_600;
-    let minute = (time_of_day % 3_600) / 60;
-
-    let (hour12, ampm) = match hour24 {
-        0 => (12, "am"),
-        1..=11 => (hour24, "am"),
-        12 => (12, "pm"),
-        _ => (hour24 - 12, "pm"),
-    };
-
-    let days_since_epoch = secs.div_euclid(86_400);
-    // Day of week: 1970-01-01 was Thursday (4)
-    let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
-    let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow as usize];
-
-    let (year, month, day) = format::days_to_ymd(days_since_epoch);
-    let month_name = [
-        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ][month as usize];
-
-    let ordinal = match day {
-        1 | 21 | 31 => "st",
-        2 | 22 => "nd",
-        3 | 23 => "rd",
-        _ => "th",
-    };
-
-    format!("{hour12}:{minute:02}{ampm}, {day_name} {month_name} {day}{ordinal} {year}")
-}
-
-fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChunk>> {
-    let files = reader::find_ftdc_files(path)?;
-    let mut all_chunks: Vec<DecodedChunk> = Vec::new();
-
-    for file_path in &files {
-        let file = std::fs::File::open(file_path)?;
-        let reader = std::io::BufReader::new(file);
-        match reader::read_ftdc_file(reader) {
-            Ok(chunks) => all_chunks.extend(chunks),
-            Err(_) => continue,
-        }
-    }
-
-    Ok(all_chunks)
 }

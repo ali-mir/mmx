@@ -8,6 +8,8 @@ pub fn format_value(path: &str, value: i64) -> String {
         format_duration_ms(value)
     } else if is_micros_metric(&path_lower) {
         format_duration_us(value)
+    } else if is_timestamp_metric(&path_lower, value) {
+        format_epoch_ms(value)
     } else {
         format_number(value)
     }
@@ -34,6 +36,28 @@ fn is_millis_metric(path: &str) -> bool {
 
 fn is_micros_metric(path: &str) -> bool {
     path.contains("micros") || path.contains("usecs")
+}
+
+fn is_timestamp_metric(path: &str, value: i64) -> bool {
+    // Path-based: fields commonly holding epoch-ms timestamps
+    let path_match = path.ends_with(".start")
+        || path.ends_with(".end")
+        || path.ends_with(".clustertime")
+        || path.ends_with(".operationtime")
+        || path.ends_with(".lastupdated")
+        || path.ends_with(".readtimestamp")
+        || path.ends_with(".oldestactivetimestamp")
+        || path.ends_with(".stabletimestamp")
+        || path.ends_with(".oldestTimestamp")
+        || path.ends_with(".walltime")
+        || path.ends_with(".date")
+        || path.ends_with(".lastapplied")
+        || path.ends_with(".lastdurable");
+
+    // Value-based fallback: looks like epoch-ms between 2000-01-01 and 2100-01-01
+    let value_looks_like_epoch_ms = (946_684_800_000..=4_102_444_800_000).contains(&value);
+
+    path_match && value_looks_like_epoch_ms
 }
 
 fn format_bytes(value: i64) -> String {
@@ -75,6 +99,43 @@ fn format_duration_us(value: i64) -> String {
     } else {
         format!("{sign}{abs}us")
     }
+}
+
+fn format_epoch_ms(value: i64) -> String {
+    let secs = value / 1_000;
+    let millis = (value % 1_000) as u32;
+
+    // Manual UTC breakdown (no chrono dependency needed)
+    let days_since_epoch = secs / 86_400;
+    let time_of_day = secs % 86_400;
+    let hour = time_of_day / 3_600;
+    let minute = (time_of_day % 3_600) / 60;
+    let second = time_of_day % 60;
+
+    // Convert days since 1970-01-01 to Y-M-D
+    // Using a simplified algorithm
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    if millis == 0 {
+        format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+    } else {
+        format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{millis:03}")
+    }
+}
+
+fn days_to_ymd(days: i64) -> (i64, i64, i64) {
+    // Civil days-from-epoch to (y, m, d) — Howard Hinnant's algorithm
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 fn format_number(value: i64) -> String {
@@ -134,6 +195,17 @@ mod tests {
     }
 
     #[test]
+    fn test_format_epoch_ms() {
+        // 2024-01-01 00:00:00.000 UTC
+        assert_eq!(format_epoch_ms(1_704_067_200_000), "2024-01-01 00:00:00");
+        // With millis
+        assert_eq!(
+            format_epoch_ms(1_704_067_200_123),
+            "2024-01-01 00:00:00.123"
+        );
+    }
+
+    #[test]
     fn test_format_value_heuristic() {
         // Byte metrics
         assert!(format_value("wiredTiger.cache.bytes", 1_073_741_824).contains("GiB"));
@@ -141,6 +213,14 @@ mod tests {
 
         // Millis metrics
         assert!(format_value("opLatencies.reads.latencyMillis", 1500).contains('s'));
+
+        // Timestamp metrics — should NOT show as "B"
+        let ts = format_value("config.image_collection.stats.end", 1_704_067_200_000);
+        assert!(ts.contains("2024"), "expected datetime, got: {ts}");
+        assert!(!ts.contains('B'), "should not format as billions: {ts}");
+
+        let ts2 = format_value("local.oplog.rs.stats.start", 1_704_067_200_000);
+        assert!(ts2.contains("2024"), "expected datetime, got: {ts2}");
 
         // Regular numbers
         assert_eq!(format_value("connections.current", 42), "42");

@@ -84,10 +84,8 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
         return Ok(DecodedChunk { metrics });
     }
 
-    // Decode delta stream (column-major with zero-RLE)
-    // For each metric, decode `sample_count` deltas.
-    // If the stream is truncated (e.g. partial interim file), fall back
-    // to returning just the reference values.
+    // Decode delta stream (column-major with zero-RLE).
+    // When the stream ends early, remaining deltas are implicitly zero.
     let deltas = decode_deltas(&mut cursor, metric_count, sample_count);
 
     // Apply cumulative sum from reference values to build actual values
@@ -98,12 +96,10 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
             let mut values = Vec::with_capacity(1 + sample_count);
             values.push(ref_metric.value); // reference (sample 0)
 
-            if let Some(all_deltas) = &deltas {
-                let mut current = ref_metric.value;
-                for &delta in &all_deltas[i] {
-                    current = current.wrapping_add(delta);
-                    values.push(current);
-                }
+            let mut current = ref_metric.value;
+            for &delta in &deltas[i] {
+                current = current.wrapping_add(delta);
+                values.push(current);
             }
 
             MetricSeries {
@@ -116,35 +112,37 @@ pub fn decode_chunk(data: &[u8]) -> Result<DecodedChunk, ChunkError> {
     Ok(DecodedChunk { metrics })
 }
 
-/// Decode the varint delta stream. Returns None if the stream is truncated.
+/// Decode the varint delta stream.
+/// When the stream ends early, remaining deltas are implicitly zero
+/// (this is normal — MongoDB omits trailing all-zero metric deltas).
 fn decode_deltas(
     cursor: &mut Cursor<&Vec<u8>>,
     metric_count: usize,
     sample_count: usize,
-) -> Option<Vec<Vec<i64>>> {
+) -> Vec<Vec<i64>> {
     let mut deltas = vec![vec![0i64; sample_count]; metric_count];
 
     for metric_deltas in &mut deltas {
         let mut sample_idx = 0;
         while sample_idx < sample_count {
-            let raw = read_uvarint(cursor).ok()?;
+            let Ok(raw) = read_uvarint(cursor) else {
+                // Stream exhausted — remaining deltas are implicitly zero
+                return deltas;
+            };
             if raw == 0 {
-                let zero_count = read_uvarint(cursor).ok()? as usize;
-                sample_idx += 1 + zero_count;
+                let Ok(zero_count) = read_uvarint(cursor) else {
+                    return deltas;
+                };
+                sample_idx += 1 + zero_count as usize;
             } else {
-                metric_deltas[sample_idx] = zigzag_decode(raw);
+                // Deltas are unsigned varints — cast to i64 for wrapping arithmetic
+                metric_deltas[sample_idx] = raw as i64;
                 sample_idx += 1;
             }
         }
     }
 
-    Some(deltas)
-}
-
-/// Zig-zag decode: maps unsigned to signed.
-/// 0 -> 0, 1 -> -1, 2 -> 1, 3 -> -2, 4 -> 2, ...
-fn zigzag_decode(n: u64) -> i64 {
-    ((n >> 1) as i64) ^ -((n & 1) as i64)
+    deltas
 }
 
 #[derive(Debug)]
@@ -152,7 +150,6 @@ pub enum ChunkError {
     TooShort,
     Decompress(std::io::Error),
     BsonParse(bson::de::Error),
-    Varint(std::io::Error),
     MetricCountMismatch { expected: usize, actual: usize },
 }
 
@@ -162,7 +159,6 @@ impl std::fmt::Display for ChunkError {
             ChunkError::TooShort => write!(f, "chunk data too short"),
             ChunkError::Decompress(e) => write!(f, "zlib decompress failed: {e}"),
             ChunkError::BsonParse(e) => write!(f, "BSON parse failed: {e}"),
-            ChunkError::Varint(e) => write!(f, "varint decode failed: {e}"),
             ChunkError::MetricCountMismatch { expected, actual } => {
                 write!(
                     f,
@@ -178,16 +174,6 @@ impl std::error::Error for ChunkError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_zigzag_decode() {
-        assert_eq!(zigzag_decode(0), 0);
-        assert_eq!(zigzag_decode(1), -1);
-        assert_eq!(zigzag_decode(2), 1);
-        assert_eq!(zigzag_decode(3), -2);
-        assert_eq!(zigzag_decode(4), 2);
-        assert_eq!(zigzag_decode(u64::MAX), i64::MIN);
-    }
 
     #[test]
     fn test_decode_chunk_too_short() {
@@ -254,10 +240,6 @@ mod tests {
         buf
     }
 
-    fn zigzag_encode(n: i64) -> u64 {
-        ((n << 1) ^ (n >> 63)) as u64
-    }
-
     #[test]
     fn test_decode_chunk_zero_samples() {
         let ref_doc = bson::doc! { "a": 10_i64, "b": 20_i64 };
@@ -275,17 +257,18 @@ mod tests {
     fn test_decode_chunk_with_deltas() {
         // Reference: a=10, b=100
         // 2 additional samples (sample_count=2)
+        // FTDC deltas are unsigned: +1 stored as 1u64, -5 stored as wrapping (u64::MAX - 4)
         // Deltas for a: +1, +1 -> values: 10, 11, 12
         // Deltas for b: +10, -5 -> values: 100, 110, 105
         let ref_doc = bson::doc! { "a": 10_i64, "b": 100_i64 };
 
         let mut delta_bytes = Vec::new();
-        // Metric 0 (a): deltas [+1, +1]
-        delta_bytes.extend_from_slice(&encode_uvarint(zigzag_encode(1)));
-        delta_bytes.extend_from_slice(&encode_uvarint(zigzag_encode(1)));
-        // Metric 1 (b): deltas [+10, -5]
-        delta_bytes.extend_from_slice(&encode_uvarint(zigzag_encode(10)));
-        delta_bytes.extend_from_slice(&encode_uvarint(zigzag_encode(-5)));
+        // Metric 0 (a): deltas [1, 1]
+        delta_bytes.extend_from_slice(&encode_uvarint(1));
+        delta_bytes.extend_from_slice(&encode_uvarint(1));
+        // Metric 1 (b): deltas [10, wrapping(-5)]
+        delta_bytes.extend_from_slice(&encode_uvarint(10));
+        delta_bytes.extend_from_slice(&encode_uvarint((-5_i64) as u64));
 
         let data = build_test_chunk(&ref_doc, 2, 2, &delta_bytes);
         let chunk = decode_chunk(&data).unwrap();

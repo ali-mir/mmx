@@ -13,7 +13,7 @@ pub struct MetricEntry {
 
 impl MetricEntry {
     pub fn delta(&self) -> Option<i64> {
-        self.previous.map(|prev| self.current - prev)
+        self.previous.map(|prev| self.current.wrapping_sub(prev))
     }
 }
 
@@ -62,7 +62,7 @@ pub struct App {
     pub mode: AppMode,
     pub focus: Focus,
     pub file_path: String,
-    pub sample_timestamp: String,
+    pub sample_epoch_ms: Option<i64>,
     pub tick_count: usize,
     pub should_quit: bool,
 }
@@ -80,7 +80,7 @@ impl App {
             mode: AppMode::Normal,
             focus: Focus::Main,
             file_path,
-            sample_timestamp: String::new(),
+            sample_epoch_ms: None,
             tick_count: 0,
 
             should_quit: false,
@@ -191,16 +191,19 @@ impl App {
                 }
             }
             Message::UpdateMetrics(new_metrics) => {
-                // Merge with existing: update current, shift previous
+                // Merge with existing: always use within-chunk previous for delta display,
+                // and track history when the value actually changes.
                 for new in &new_metrics {
                     if let Some(existing) = self.metrics.iter_mut().find(|m| m.path == new.path) {
-                        existing.previous = Some(existing.current);
-                        existing.current = new.current;
-                        existing.history.push(new.current);
-                        // Keep last 300 samples
-                        if existing.history.len() > 300 {
-                            existing.history.remove(0);
+                        if new.current != existing.current {
+                            existing.history.push(new.current);
+                            // Keep last 300 samples
+                            if existing.history.len() > 300 {
+                                existing.history.remove(0);
+                            }
                         }
+                        existing.current = new.current;
+                        existing.previous = new.previous;
                     }
                 }
                 // Add any new metrics not yet seen
@@ -408,14 +411,15 @@ mod tests {
         assert_eq!(app.metrics[0].current, 10);
         assert_eq!(app.metrics[0].previous, None);
 
+        // previous comes from the new data (within-chunk delta), not app tracking
         app.update(Message::UpdateMetrics(vec![MetricEntry {
             path: "a".into(),
             current: 20,
-            previous: None,
+            previous: Some(15),
             history: vec![20],
         }]));
         assert_eq!(app.metrics[0].current, 20);
-        assert_eq!(app.metrics[0].previous, Some(10));
+        assert_eq!(app.metrics[0].previous, Some(15));
         assert_eq!(app.metrics[0].history, vec![10, 20]);
     }
 }

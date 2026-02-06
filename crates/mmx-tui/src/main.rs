@@ -81,6 +81,16 @@ struct LoadResult {
     info: String,
 }
 
+/// Summary of samples in chunks.
+fn chunk_summary(chunks: &[DecodedChunk]) -> String {
+    let total_samples: usize = chunks
+        .iter()
+        .map(|c| c.metrics.first().map_or(0, |m| m.values.len()))
+        .sum();
+    let n = chunks.len();
+    format!("{n}ch/{total_samples}s")
+}
+
 /// Try to read an FTDC file. Returns (chunks, error_message).
 fn try_read_ftdc_file(path: &std::path::Path) -> (Vec<DecodedChunk>, Option<String>) {
     let data = match std::fs::read(path) {
@@ -133,8 +143,8 @@ fn load_all_chunks(path: &std::path::Path) -> LoadResult {
             for attempt in 0..5 {
                 let (chunks, err) = try_read_ftdc_file(file_path);
                 if !chunks.is_empty() {
-                    let n = chunks.len();
-                    parts.push(format!("interim: {n}ch@try{attempt}"));
+                    let summary = chunk_summary(&chunks);
+                    parts.push(format!("interim: {summary}@try{attempt}"));
                     all_chunks.extend(chunks);
                     break;
                 }
@@ -148,9 +158,9 @@ fn load_all_chunks(path: &std::path::Path) -> LoadResult {
             }
         } else {
             let (chunks, err) = try_read_ftdc_file(file_path);
-            let n = chunks.len();
-            if n > 0 {
-                parts.push(format!("{name}: {n}ch"));
+            if !chunks.is_empty() {
+                let summary = chunk_summary(&chunks);
+                parts.push(format!("{name}: {summary}"));
             } else {
                 let reason = err.unwrap_or_else(|| "0 chunks".into());
                 parts.push(format!("{name}: {reason}"));
@@ -163,40 +173,6 @@ fn load_all_chunks(path: &std::path::Path) -> LoadResult {
         chunks: all_chunks,
         info: parts.join(" | "),
     }
-}
-
-/// Format an epoch-ms timestamp as a human-readable local time string.
-fn format_sample_timestamp(epoch_ms: i64) -> String {
-    let epoch_secs = epoch_ms / 1_000;
-
-    let (year, month, day, hour, minute, second, wday) = unsafe {
-        let time = epoch_secs as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&time, &mut tm);
-        (
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec,
-            tm.tm_wday,
-        )
-    };
-
-    let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][wday as usize];
-    let month_name = [
-        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ][month as usize];
-
-    let ordinal = match day {
-        1 | 21 | 31 => "st",
-        2 | 22 => "nd",
-        3 | 23 => "rd",
-        _ => "th",
-    };
-
-    format!("{hour:02}:{minute:02}:{second:02}, {day_name} {month_name} {day}{ordinal} {year}")
 }
 
 #[tokio::main]
@@ -221,7 +197,7 @@ async fn main() -> color_eyre::Result<()> {
     writeln!(log, "tick:0 {}", result.info)?;
     if let Some((metrics, ts)) = latest_sample(&result.chunks) {
         if let Some(epoch_ms) = ts {
-            app.sample_timestamp = format_sample_timestamp(epoch_ms);
+            app.sample_epoch_ms = Some(epoch_ms);
         }
         app.update(Message::UpdateMetrics(metrics));
     }
@@ -262,14 +238,19 @@ async fn main() -> color_eyre::Result<()> {
                 app.tick_count += 1;
                 // Re-read FTDC files from disk to pick up new data
                 let result = load_all_chunks(&path);
-                let _ = writeln!(log, "tick:{} {}", app.tick_count, result.info);
-                let _ = log.flush();
+                let mut tick_log = format!("tick:{} {}", app.tick_count, result.info);
                 if let Some((metrics, ts)) = latest_sample(&result.chunks) {
                     if let Some(epoch_ms) = ts {
-                        app.sample_timestamp = format_sample_timestamp(epoch_ms);
+                        tick_log.push_str(&format!(" | ts={epoch_ms}"));
+                        app.sample_epoch_ms = Some(epoch_ms);
                     }
+                    tick_log.push_str(&format!(" | metrics={}", metrics.len()));
                     app.update(Message::UpdateMetrics(metrics));
+                } else {
+                    tick_log.push_str(" | no-sample");
                 }
+                let _ = writeln!(log, "{tick_log}");
+                let _ = log.flush();
             }
             Event::Key(key) => {
                 // Only handle key press events (not release/repeat)

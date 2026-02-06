@@ -22,7 +22,7 @@ pub enum Event {
 /// Async event handler that polls crossterm events and emits ticks/renders.
 pub struct EventHandler {
     rx: mpsc::UnboundedReceiver<Event>,
-    _task: tokio::task::JoinHandle<()>,
+    _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl EventHandler {
@@ -30,45 +30,57 @@ impl EventHandler {
     pub fn new(tick_rate: Duration, render_rate: Duration) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
-        let task = tokio::spawn(async move {
-            let mut tick_interval = tokio::time::interval(tick_rate);
-            let mut render_interval = tokio::time::interval(render_rate);
+        let mut tasks = Vec::new();
 
+        // Tick emitter
+        let tx_tick = tx.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick_rate);
             loop {
-                let event = tokio::select! {
-                    _ = tick_interval.tick() => Event::Tick,
-                    _ = render_interval.tick() => Event::Render,
-                    maybe_event = tokio::task::spawn_blocking(|| {
-                        event::poll(Duration::from_millis(50))
-                            .ok()
-                            .and_then(|has_event| {
-                                if has_event {
-                                    event::read().ok()
-                                } else {
-                                    None
-                                }
-                            })
-                    }) => {
-                        if let Ok(Some(crossterm_event)) = maybe_event {
-                            match crossterm_event {
-                                CrosstermEvent::Key(key) => Event::Key(key),
-                                CrosstermEvent::Mouse(mouse) => Event::Mouse(mouse),
-                                CrosstermEvent::Resize(w, h) => Event::Resize(w, h),
-                                _ => continue,
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                };
-
-                if tx.send(event).is_err() {
+                interval.tick().await;
+                if tx_tick.send(Event::Tick).is_err() {
                     break;
                 }
             }
-        });
+        }));
 
-        EventHandler { rx, _task: task }
+        // Render emitter
+        let tx_render = tx.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(render_rate);
+            loop {
+                interval.tick().await;
+                if tx_render.send(Event::Render).is_err() {
+                    break;
+                }
+            }
+        }));
+
+        // Crossterm event poller
+        tasks.push(tokio::spawn(async move {
+            loop {
+                let maybe_event = tokio::task::spawn_blocking(|| {
+                    event::poll(Duration::from_millis(100))
+                        .ok()
+                        .and_then(|has_event| if has_event { event::read().ok() } else { None })
+                })
+                .await;
+
+                if let Ok(Some(crossterm_event)) = maybe_event {
+                    let event = match crossterm_event {
+                        CrosstermEvent::Key(key) => Event::Key(key),
+                        CrosstermEvent::Mouse(mouse) => Event::Mouse(mouse),
+                        CrosstermEvent::Resize(w, h) => Event::Resize(w, h),
+                        _ => continue,
+                    };
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            }
+        }));
+
+        EventHandler { rx, _tasks: tasks }
     }
 
     /// Receive the next event.

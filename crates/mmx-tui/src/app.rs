@@ -63,6 +63,7 @@ pub struct App {
     pub focus: Focus,
     pub file_path: String,
     pub sample_timestamp: String,
+    pub tick_count: usize,
     pub should_quit: bool,
 }
 
@@ -80,6 +81,7 @@ impl App {
             focus: Focus::Main,
             file_path,
             sample_timestamp: String::new(),
+            tick_count: 0,
             should_quit: false,
         }
     }
@@ -206,8 +208,9 @@ impl App {
                         self.metrics.push(new);
                     }
                 }
-                // Sort alphabetically
-                self.metrics.sort_by(|a, b| a.path.cmp(&b.path));
+                // Sort by priority group, then alphabetically within each group
+                self.metrics
+                    .sort_by(|a, b| metric_sort_key(&a.path).cmp(&metric_sort_key(&b.path)));
             }
             Message::Tick => {
                 // Tick is handled externally; this is a no-op in state
@@ -244,6 +247,21 @@ impl App {
     pub fn is_pinned(&self, path: &str) -> bool {
         self.pinned.contains(path)
     }
+}
+
+/// Sort priority: lower number = higher in the list.
+/// Groups: opcounters (0), connections (1), replication (2), everything else (3).
+fn metric_sort_key(path: &str) -> (u8, &str) {
+    let group = if path.starts_with("serverStatus.opcounters") {
+        0
+    } else if path.starts_with("serverStatus.connections") {
+        1
+    } else if path.starts_with("replSetGetStatus") {
+        2
+    } else {
+        3
+    };
+    (group, path)
 }
 
 #[cfg(test)]

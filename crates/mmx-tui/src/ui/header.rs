@@ -30,6 +30,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    spans.push(Span::styled(
+        format!("| tick:{} ", app.tick_count),
+        theme::HEADER_STYLE,
+    ));
+
     let paragraph = Paragraph::new(Line::from(spans)).style(theme::HEADER_STYLE);
     f.render_widget(paragraph, area);
 }

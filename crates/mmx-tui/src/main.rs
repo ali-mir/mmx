@@ -75,7 +75,7 @@ fn latest_sample(chunks: &[DecodedChunk]) -> Option<(Vec<MetricEntry>, Option<i6
 }
 
 /// Load all FTDC chunks from a path. Reads each file into memory first
-/// to handle partially-written interim files gracefully.
+/// so partially-written interim files don't cause streaming read issues.
 fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChunk>> {
     let files = reader::find_ftdc_files(path)?;
     let mut all_chunks: Vec<DecodedChunk> = Vec::new();
@@ -85,17 +85,6 @@ fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChun
             Ok(d) => d,
             Err(_) => continue,
         };
-
-        // Check if the file contains a complete BSON document.
-        // BSON docs start with a 4-byte LE size. If the file is shorter
-        // than this size, it's a partial write (e.g. interim mid-update).
-        if data.len() < 4 {
-            continue;
-        }
-        let first_doc_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if data.len() < first_doc_size {
-            continue;
-        }
 
         let cursor = io::Cursor::new(data);
         match reader::read_ftdc_file(cursor) {
@@ -111,7 +100,7 @@ fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChun
 fn format_sample_timestamp(epoch_ms: i64) -> String {
     let epoch_secs = epoch_ms / 1_000;
 
-    let (year, month, day, hour24, minute, second, wday) = unsafe {
+    let (year, month, day, hour, minute, second, wday) = unsafe {
         let time = epoch_secs as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&time, &mut tm);
@@ -126,13 +115,6 @@ fn format_sample_timestamp(epoch_ms: i64) -> String {
         )
     };
 
-    let (hour12, ampm) = match hour24 {
-        0 => (12, "am"),
-        1..=11 => (hour24, "am"),
-        12 => (12, "pm"),
-        _ => (hour24 - 12, "pm"),
-    };
-
     let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][wday as usize];
     let month_name = [
         "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -145,7 +127,7 @@ fn format_sample_timestamp(epoch_ms: i64) -> String {
         _ => "th",
     };
 
-    format!("{hour12}:{minute:02}:{second:02}{ampm}, {day_name} {month_name} {day}{ordinal} {year}")
+    format!("{hour:02}:{minute:02}:{second:02}, {day_name} {month_name} {day}{ordinal} {year}")
 }
 
 #[tokio::main]
@@ -204,6 +186,7 @@ async fn main() -> color_eyre::Result<()> {
                 terminal.draw(|f| ui::render(f, &mut app))?;
             }
             Event::Tick => {
+                app.tick_count += 1;
                 // Re-read FTDC files from disk to pick up new data
                 if let Ok(chunks) = load_all_chunks(&path) {
                     if let Some((metrics, ts)) = latest_sample(&chunks) {

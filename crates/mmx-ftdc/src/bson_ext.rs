@@ -10,17 +10,19 @@ pub struct FlatMetric {
 /// Flatten a BSON document into a list of `(path, i64)` pairs.
 ///
 /// Performs depth-first traversal, extracting only numeric fields.
-/// Nested documents produce dot-separated paths (e.g., `serverStatus.connections.current`).
+/// Nested documents and arrays are recursed into, producing dot-separated paths
+/// (e.g., `serverStatus.connections.current`, `locks.0.mode`).
 ///
-/// Handled BSON types:
+/// Handled BSON types (matching MongoDB server's FTDC collector):
 /// - `Boolean`: `false` = 0, `true` = 1
 /// - `Int32`: directly cast to i64
 /// - `Int64`: used directly
 /// - `Double`: cast to i64 (truncated)
+/// - `Decimal128`: lossy conversion via f64 to i64
 /// - `DateTime`: milliseconds since epoch
 /// - `Timestamp`: split into two metrics: `.t` (seconds) and `.i` (increment)
-///
-/// All other types (strings, arrays, etc.) are skipped.
+/// - `Document`: recurse
+/// - `Array`: recurse with positional index keys (0, 1, 2, ...)
 pub fn flatten_bson(doc: &Document) -> Vec<FlatMetric> {
     let mut result = Vec::new();
     flatten_recursive(doc, &mut String::new(), &mut result);
@@ -35,56 +37,80 @@ fn flatten_recursive(doc: &Document, prefix: &mut String, out: &mut Vec<FlatMetr
         }
         prefix.push_str(key);
 
-        match value {
-            Bson::Boolean(b) => {
-                out.push(FlatMetric {
-                    path: prefix.clone(),
-                    value: *b as i64,
-                });
-            }
-            Bson::Int32(n) => {
-                out.push(FlatMetric {
-                    path: prefix.clone(),
-                    value: *n as i64,
-                });
-            }
-            Bson::Int64(n) => {
-                out.push(FlatMetric {
-                    path: prefix.clone(),
-                    value: *n,
-                });
-            }
-            Bson::Double(f) => {
-                out.push(FlatMetric {
-                    path: prefix.clone(),
-                    value: *f as i64,
-                });
-            }
-            Bson::DateTime(dt) => {
-                out.push(FlatMetric {
-                    path: prefix.clone(),
-                    value: dt.timestamp_millis(),
-                });
-            }
-            Bson::Timestamp(ts) => {
-                out.push(FlatMetric {
-                    path: format!("{prefix}.t"),
-                    value: ts.time as i64,
-                });
-                out.push(FlatMetric {
-                    path: format!("{prefix}.i"),
-                    value: ts.increment as i64,
-                });
-            }
-            Bson::Document(nested) => {
-                flatten_recursive(nested, prefix, out);
-            }
-            _ => {
-                // Skip non-numeric types (String, Array, Binary, etc.)
-            }
-        }
+        flatten_value(value, prefix, out);
 
         prefix.truncate(path_start);
+    }
+}
+
+fn flatten_value(value: &Bson, prefix: &mut String, out: &mut Vec<FlatMetric>) {
+    match value {
+        Bson::Boolean(b) => {
+            out.push(FlatMetric {
+                path: prefix.clone(),
+                value: *b as i64,
+            });
+        }
+        Bson::Int32(n) => {
+            out.push(FlatMetric {
+                path: prefix.clone(),
+                value: *n as i64,
+            });
+        }
+        Bson::Int64(n) => {
+            out.push(FlatMetric {
+                path: prefix.clone(),
+                value: *n,
+            });
+        }
+        Bson::Double(f) => {
+            out.push(FlatMetric {
+                path: prefix.clone(),
+                value: *f as i64,
+            });
+        }
+        Bson::Decimal128(d) => {
+            let s = d.to_string();
+            let value = s.parse::<f64>().map(|f| f as i64).unwrap_or(0);
+            out.push(FlatMetric {
+                path: prefix.clone(),
+                value,
+            });
+        }
+        Bson::DateTime(dt) => {
+            out.push(FlatMetric {
+                path: prefix.clone(),
+                value: dt.timestamp_millis(),
+            });
+        }
+        Bson::Timestamp(ts) => {
+            out.push(FlatMetric {
+                path: format!("{prefix}.t"),
+                value: ts.time as i64,
+            });
+            out.push(FlatMetric {
+                path: format!("{prefix}.i"),
+                value: ts.increment as i64,
+            });
+        }
+        Bson::Document(nested) => {
+            flatten_recursive(nested, prefix, out);
+        }
+        Bson::Array(arr) => {
+            // MongoDB FTDC treats arrays like documents, indexing by position
+            for (i, item) in arr.iter().enumerate() {
+                let path_start = prefix.len();
+                prefix.push('.');
+                prefix.push_str(&i.to_string());
+
+                flatten_value(item, prefix, out);
+
+                prefix.truncate(path_start);
+            }
+        }
+        _ => {
+            // Skip non-numeric types (String, Binary, ObjectId, etc.)
+        }
     }
 }
 
@@ -220,5 +246,34 @@ mod tests {
         let doc = doc! { "time": dt };
         let flat = flatten_bson(&doc);
         assert_eq!(flat[0].value, 1700000000000);
+    }
+
+    #[test]
+    fn test_array_of_ints() {
+        let doc = doc! { "arr": [10_i32, 20_i32, 30_i32] };
+        let flat = flatten_bson(&doc);
+        assert_eq!(flat.len(), 3);
+        assert_eq!(flat[0].path, "arr.0");
+        assert_eq!(flat[0].value, 10);
+        assert_eq!(flat[1].path, "arr.1");
+        assert_eq!(flat[1].value, 20);
+        assert_eq!(flat[2].path, "arr.2");
+        assert_eq!(flat[2].value, 30);
+    }
+
+    #[test]
+    fn test_array_of_documents() {
+        let doc = doc! {
+            "locks": [
+                { "mode": 1_i32, "count": 100_i64 },
+                { "mode": 2_i32, "count": 200_i64 },
+            ]
+        };
+        let flat = flatten_bson(&doc);
+        assert_eq!(flat.len(), 4);
+        assert_eq!(flat[0].path, "locks.0.mode");
+        assert_eq!(flat[1].path, "locks.0.count");
+        assert_eq!(flat[2].path, "locks.1.mode");
+        assert_eq!(flat[3].path, "locks.1.count");
     }
 }

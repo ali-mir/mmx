@@ -155,7 +155,7 @@ cargo run -- test-data/diagnostic.data
 
 ```bash
 cargo build                    # Build
-cargo test                     # Test (43 tests)
+cargo test                     # Test (44 tests)
 cargo clippy -- -D warnings    # Lint
 cargo fmt                      # Format
 ```

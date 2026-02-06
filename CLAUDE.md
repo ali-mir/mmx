@@ -18,8 +18,10 @@ mmx/
 │   │       ├── chunk.rs        # Metric chunk decoding (decompress + delta + zigzag)
 │   │       └── reader.rs       # File-level FTDC reader (iterate documents, tailing)
 │   └── mmx-tui/            # TUI application binary
+│       ├── examples/
+│       │   └── dump.rs        # Diagnostic: dump formatted metrics to stdout
 │       └── src/
-│           ├── main.rs         # Entry point, clap CLI, terminal setup, event loop
+│           ├── main.rs         # Entry point, clap CLI, Timeline, event loop
 │           ├── app.rs          # App state (Elm architecture) + update logic
 │           ├── event.rs        # Async event handler (tick/render/key via tokio)
 │           ├── format.rs       # Human-readable value formatting (bytes, durations, numbers)
@@ -37,7 +39,7 @@ mmx/
 
 ```bash
 cargo build                    # Build all crates
-cargo test                     # Run all tests (40 tests)
+cargo test                     # Run all tests (44 tests)
 cargo clippy -- -D warnings    # Lint with strict warnings
 cargo fmt --check              # Check formatting
 cargo run --bin mmx -- <path>  # Run the TUI with an FTDC file/directory
@@ -50,7 +52,7 @@ cargo run --bin mmx -- <path>  # Run the TUI with an FTDC file/directory
 Standalone library crate. No TUI dependencies. Decoding pipeline:
 
 1. **Varint** (`varint.rs`): LEB128 unsigned varint decoder
-2. **BSON Flatten** (`bson_ext.rs`): Depth-first traversal extracting numeric fields with dot-separated paths. Handles Bool, Int32, Int64, Double, DateTime, Timestamp (split into .t/.i)
+2. **BSON Flatten** (`bson_ext.rs`): Depth-first traversal extracting numeric fields with dot-separated paths. Handles Bool, Int32, Int64, Double, DateTime, Timestamp (split into .t/.i), Decimal128, Array
 3. **Chunk Decode** (`chunk.rs`): Parse type-1 FTDC docs: read uncompressed_size → zlib decompress → parse reference BSON → read metric_count/sample_count → decode varint delta stream with zero-RLE → zigzag decode → cumulative sum
 4. **File Reader** (`reader.rs`): Read sequential BSON documents, classify by type field (0=metadata, 1=metric, 2=metadata delta), decode metric chunks. Supports file tailing via `TailingReader`
 
@@ -61,7 +63,9 @@ Elm architecture (TEA pattern):
 - **Update**: `App::update(msg)` — pure state transitions driven by `Message` enum
 - **View**: `ui/mod.rs` — dispatches to header/pinned/metrics/footer renderers
 
-Event loop: tokio async with separate tick (1s, data refresh) and render (100ms, screen draw) intervals.
+Data pipeline: `Timeline` struct flattens all FTDC samples across chunks into a linear sequence. On each tick, the cursor advances one sample, wrapping for replay.
+
+Event loop: tokio async with separate tick (1s, advance sample) and render (100ms, screen draw) intervals.
 
 ### Key Design Decisions
 
@@ -124,8 +128,6 @@ Event loop: tokio async with separate tick (1s, data refresh) and render (100ms,
 - [ ] Metric source trait: abstract data source behind `trait MetricSource`
 - [ ] TUI snapshot tests: use ratatui `TestBackend` for rendered output assertions
 - [ ] File watcher: use `notify` crate to detect new/rotated FTDC files instead of polling
-- [ ] Smarter timestamp formatting: metrics ending in `.start`, `.end`, or whose values look like epoch-ms should render as datetimes, not "1.70B"
-
 ## Known Bugs
 
-- Timestamp-valued metrics (e.g. `config.image_collection.stats.end`) are epoch-ms stored as i64 — they show up as "1.70B" in the TUI instead of formatted timestamps
+(none currently)

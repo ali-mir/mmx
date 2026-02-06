@@ -6,7 +6,6 @@ mod ui;
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -32,6 +31,100 @@ struct Cli {
     path: PathBuf,
 }
 
+/// Flattened timeline: one entry per sample across all chunks.
+/// Each entry is a Vec of (path, value) for every metric at that point in time.
+struct Timeline {
+    /// Metric paths (same order for every sample).
+    paths: Vec<String>,
+    /// samples[i][j] = value of metric j at sample i.
+    samples: Vec<Vec<i64>>,
+    /// Current playback position.
+    cursor: usize,
+}
+
+impl Timeline {
+    fn from_chunks(chunks: &[DecodedChunk]) -> Self {
+        if chunks.is_empty() {
+            return Timeline {
+                paths: Vec::new(),
+                samples: Vec::new(),
+                cursor: 0,
+            };
+        }
+
+        // Use the first chunk's metrics as the canonical path list
+        let paths: Vec<String> = chunks
+            .last()
+            .unwrap()
+            .metrics
+            .iter()
+            .map(|m| m.path.clone())
+            .collect();
+
+        let mut samples: Vec<Vec<i64>> = Vec::new();
+
+        for chunk in chunks {
+            if chunk.metrics.is_empty() {
+                continue;
+            }
+            let num_samples = chunk.metrics[0].values.len();
+
+            for sample_idx in 0..num_samples {
+                let sample: Vec<i64> = chunk
+                    .metrics
+                    .iter()
+                    .map(|m| m.values.get(sample_idx).copied().unwrap_or(0))
+                    .collect();
+                samples.push(sample);
+            }
+        }
+
+        Timeline {
+            paths,
+            samples,
+            cursor: 0,
+        }
+    }
+
+    fn total_samples(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Get the current sample as MetricEntry list, then advance the cursor.
+    fn next_sample(&mut self) -> Option<Vec<MetricEntry>> {
+        if self.samples.is_empty() {
+            return None;
+        }
+
+        let current_idx = self.cursor;
+        let prev_idx = current_idx.checked_sub(1);
+
+        let current_values = &self.samples[current_idx];
+        let prev_values = prev_idx.map(|i| &self.samples[i]);
+
+        let metrics = self
+            .paths
+            .iter()
+            .enumerate()
+            .map(|(j, path)| {
+                let current = current_values[j];
+                let previous = prev_values.map(|pv| pv[j]);
+                MetricEntry {
+                    path: path.clone(),
+                    current,
+                    previous,
+                    history: Vec::new(), // History tracked by App
+                }
+            })
+            .collect();
+
+        // Advance cursor, wrapping to start for replay
+        self.cursor = (self.cursor + 1) % self.samples.len();
+
+        Some(metrics)
+    }
+}
+
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -44,13 +137,21 @@ async fn main() -> color_eyre::Result<()> {
         std::process::exit(1);
     }
 
-    // Initial load of FTDC data
-    let ftdc_path = path.clone();
-    let (initial_metrics, total_chunks) = load_ftdc_data(&ftdc_path)?;
+    // Load all FTDC chunks
+    let all_chunks = load_all_chunks(&path)?;
+    let total_chunks = all_chunks.len();
+
+    let mut timeline = Timeline::from_chunks(&all_chunks);
+    let total_samples = timeline.total_samples();
 
     let mut app = App::new(path.display().to_string());
     app.total_chunks = total_chunks;
-    app.update(Message::UpdateMetrics(initial_metrics));
+    app.sample_time = format!("sample 1/{total_samples}");
+
+    // Load first sample
+    if let Some(metrics) = timeline.next_sample() {
+        app.update(Message::UpdateMetrics(metrics));
+    }
 
     // Set up terminal
     terminal::enable_raw_mode()?;
@@ -67,9 +168,6 @@ async fn main() -> color_eyre::Result<()> {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         original_hook(panic);
     }));
-
-    // Shared path for the file watcher reload
-    let shared_path = Arc::new(ftdc_path);
 
     // Event loop
     let mut events = EventHandler::new(Duration::from_secs(1), Duration::from_millis(100));
@@ -88,16 +186,10 @@ async fn main() -> color_eyre::Result<()> {
                 terminal.draw(|f| ui::render(f, &mut app))?;
             }
             Event::Tick => {
-                // Reload FTDC data on tick
-                let path = Arc::clone(&shared_path);
-                match load_ftdc_data(&path) {
-                    Ok((metrics, chunks)) => {
-                        app.total_chunks = chunks;
-                        app.update(Message::UpdateMetrics(metrics));
-                    }
-                    Err(_) => {
-                        // Silently ignore reload errors (file may be rotating)
-                    }
+                // Advance to next sample in the timeline
+                if let Some(metrics) = timeline.next_sample() {
+                    app.sample_time = format!("sample {}/{total_samples}", timeline.cursor);
+                    app.update(Message::UpdateMetrics(metrics));
                 }
             }
             Event::Key(key) => {
@@ -162,7 +254,7 @@ async fn main() -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn load_ftdc_data(path: &std::path::Path) -> color_eyre::Result<(Vec<MetricEntry>, usize)> {
+fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChunk>> {
     let files = reader::find_ftdc_files(path)?;
     let mut all_chunks: Vec<DecodedChunk> = Vec::new();
 
@@ -171,35 +263,9 @@ fn load_ftdc_data(path: &std::path::Path) -> color_eyre::Result<(Vec<MetricEntry
         let reader = std::io::BufReader::new(file);
         match reader::read_ftdc_file(reader) {
             Ok(chunks) => all_chunks.extend(chunks),
-            Err(_) => continue, // Skip files that can't be parsed
+            Err(_) => continue,
         }
     }
 
-    let total_chunks = all_chunks.len();
-
-    // Take the last chunk's values as current metrics
-    let metrics = if let Some(last_chunk) = all_chunks.last() {
-        last_chunk
-            .metrics
-            .iter()
-            .map(|m| {
-                let current = *m.values.last().unwrap_or(&0);
-                let previous = if m.values.len() >= 2 {
-                    Some(m.values[m.values.len() - 2])
-                } else {
-                    None
-                };
-                MetricEntry {
-                    path: m.path.clone(),
-                    current,
-                    previous,
-                    history: m.values.clone(),
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    Ok((metrics, total_chunks))
+    Ok(all_chunks)
 }

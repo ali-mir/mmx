@@ -139,7 +139,13 @@ impl<R: Read> Iterator for FtdcReader<R> {
         match self.next_record() {
             Ok(Some(record)) => Some(Ok(record)),
             Ok(None) => None,
+            Err(e @ FtdcError::Chunk(_)) => {
+                // Chunk decode failed but the BSON doc was read OK, so
+                // the stream is positioned correctly for the next doc.
+                Some(Err(e))
+            }
             Err(e) => {
+                // IO or BSON parse error — stream position is unreliable.
                 self.done = true;
                 Some(Err(e))
             }
@@ -147,15 +153,17 @@ impl<R: Read> Iterator for FtdcReader<R> {
     }
 }
 
-/// Read all metric chunks from an FTDC file, returning the final state
-/// (most recent values for all metrics).
+/// Read all metric chunks from an FTDC file, skipping any records that
+/// fail to decode (e.g. truncated interim files).
 pub fn read_ftdc_file<R: Read>(reader: R) -> Result<Vec<DecodedChunk>, FtdcError> {
     let ftdc = FtdcReader::new(reader);
     let mut chunks = Vec::new();
 
     for record in ftdc {
-        if let FtdcRecord::MetricChunk(chunk) = record? {
-            chunks.push(chunk);
+        match record {
+            Ok(FtdcRecord::MetricChunk(chunk)) => chunks.push(chunk),
+            Err(_) => continue,
+            _ => {}
         }
     }
 

@@ -123,11 +123,14 @@ Event loop: tokio async with separate tick (1s, advance sample) and render (100m
 
 ## TODO
 
+- [ ] Hide zero-valued metrics: omit metrics whose current value is 0 to reduce noise
+- [ ] Section pinning: `/pin <prefix>` to pin all metrics under a section (e.g. `/pin replication`) to the top
 - [ ] Sparkline charts: inline mini charts for metric history (data model stores last 300 samples)
 - [ ] Live server polling: `mmx --uri mongodb://localhost:27017` via `serverStatus` polling
 - [ ] Metric source trait: abstract data source behind `trait MetricSource`
 - [ ] TUI snapshot tests: use ratatui `TestBackend` for rendered output assertions
 - [ ] File watcher: use `notify` crate to detect new/rotated FTDC files instead of polling
+
 ## Known Bugs
 
 (none currently)

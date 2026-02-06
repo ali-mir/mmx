@@ -108,15 +108,17 @@ impl Timeline {
         let current_values = &self.samples[current_idx];
         let prev_values = prev_idx.map(|i| &self.samples[i]);
 
-        let timestamp = self.start_index().map(|i| current_values[i]);
+        let timestamp = self
+            .start_index()
+            .and_then(|i| current_values.get(i).copied());
 
         let metrics = self
             .paths
             .iter()
             .enumerate()
             .map(|(j, path)| {
-                let current = current_values[j];
-                let previous = prev_values.map(|pv| pv[j]);
+                let current = current_values.get(j).copied().unwrap_or(0);
+                let previous = prev_values.and_then(|pv| pv.get(j).copied());
                 MetricEntry {
                     path: path.clone(),
                     current,

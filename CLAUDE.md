@@ -97,8 +97,35 @@ Event loop: tokio async with separate tick (1s, data refresh) and render (100ms,
 - `color-eyre` — Error handling + panic recovery
 - `notify` — File watching for FTDC rotation
 
-## Future Work
+## Done
 
-- **Sparkline charts**: Inline mini charts for metric history (data model already stores last 300 samples)
-- **Live server polling**: `mmx --uri mongodb://localhost:27017` via `serverStatus` polling
-- **Metric source trait**: Abstract data source behind `trait MetricSource`
+- [x] Phase 1: Project scaffolding (workspace, deps, .gitignore)
+- [x] Phase 2a: Varint decoder (LEB128)
+- [x] Phase 2b: BSON flattening (Bool, Int32, Int64, Double, DateTime, Timestamp, Decimal128, Document, Array)
+- [x] Phase 2c: Chunk decoder (zlib + delta + zigzag + zero-RLE)
+- [x] Phase 2d: File reader (BSON doc iteration, type classification, directory scan, tailing)
+- [x] Phase 2e: Integration test with real FTDC data
+- [x] Phase 3a: Terminal setup (clap CLI, alternate screen, panic hook, clean shutdown)
+- [x] Phase 3b: Event handler (async tick/render/key via tokio)
+- [x] Phase 3c: App state (Elm architecture, state transitions, pin/unpin, filter)
+- [x] Phase 3d: Layout (header, pinned, metrics, footer)
+- [x] Phase 4a: Metric table (scrollable, sorted, scrollbar, delta column)
+- [x] Phase 4b: Pin/unpin with pinned panel
+- [x] Phase 4c: Search/filter mode
+- [x] Phase 4d: Data pipeline (load FTDC, tick refresh)
+- [x] Phase 5a: Theme (htop-inspired color palette)
+- [x] Phase 5b: Metric formatting (bytes, durations, numbers)
+- [x] Phase 5c: Help overlay
+
+## TODO
+
+- [ ] Sparkline charts: inline mini charts for metric history (data model stores last 300 samples)
+- [ ] Live server polling: `mmx --uri mongodb://localhost:27017` via `serverStatus` polling
+- [ ] Metric source trait: abstract data source behind `trait MetricSource`
+- [ ] TUI snapshot tests: use ratatui `TestBackend` for rendered output assertions
+- [ ] File watcher: use `notify` crate to detect new/rotated FTDC files instead of polling
+- [ ] Smarter timestamp formatting: metrics ending in `.start`, `.end`, or whose values look like epoch-ms should render as datetimes, not "1.70B"
+
+## Known Bugs
+
+- Timestamp-valued metrics (e.g. `config.image_collection.stats.end`) are epoch-ms stored as i64 — they show up as "1.70B" in the TUI instead of formatted timestamps

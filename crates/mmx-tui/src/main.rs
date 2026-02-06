@@ -74,14 +74,31 @@ fn latest_sample(chunks: &[DecodedChunk]) -> Option<(Vec<MetricEntry>, Option<i6
     Some((metrics, timestamp))
 }
 
+/// Load all FTDC chunks from a path. Reads each file into memory first
+/// to handle partially-written interim files gracefully.
 fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChunk>> {
     let files = reader::find_ftdc_files(path)?;
     let mut all_chunks: Vec<DecodedChunk> = Vec::new();
 
     for file_path in &files {
-        let file = std::fs::File::open(file_path)?;
-        let reader = std::io::BufReader::new(file);
-        match reader::read_ftdc_file(reader) {
+        let data = match std::fs::read(file_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // Check if the file contains a complete BSON document.
+        // BSON docs start with a 4-byte LE size. If the file is shorter
+        // than this size, it's a partial write (e.g. interim mid-update).
+        if data.len() < 4 {
+            continue;
+        }
+        let first_doc_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if data.len() < first_doc_size {
+            continue;
+        }
+
+        let cursor = io::Cursor::new(data);
+        match reader::read_ftdc_file(cursor) {
             Ok(chunks) => all_chunks.extend(chunks),
             Err(_) => continue,
         }
@@ -90,12 +107,24 @@ fn load_all_chunks(path: &std::path::Path) -> color_eyre::Result<Vec<DecodedChun
     Ok(all_chunks)
 }
 
+/// Format an epoch-ms timestamp as a human-readable local time string.
 fn format_sample_timestamp(epoch_ms: i64) -> String {
-    let secs = epoch_ms / 1_000;
-    let time_of_day = secs.rem_euclid(86_400);
-    let hour24 = time_of_day / 3_600;
-    let minute = (time_of_day % 3_600) / 60;
-    let second = time_of_day % 60;
+    let epoch_secs = epoch_ms / 1_000;
+
+    let (year, month, day, hour24, minute, second, wday) = unsafe {
+        let time = epoch_secs as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&time, &mut tm);
+        (
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+            tm.tm_wday,
+        )
+    };
 
     let (hour12, ampm) = match hour24 {
         0 => (12, "am"),
@@ -104,12 +133,7 @@ fn format_sample_timestamp(epoch_ms: i64) -> String {
         _ => (hour24 - 12, "pm"),
     };
 
-    let days_since_epoch = secs.div_euclid(86_400);
-    // Day of week: 1970-01-01 was Thursday (4)
-    let dow = ((days_since_epoch + 4) % 7 + 7) % 7;
-    let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow as usize];
-
-    let (year, month, day) = format::days_to_ymd(days_since_epoch);
+    let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][wday as usize];
     let month_name = [
         "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][month as usize];

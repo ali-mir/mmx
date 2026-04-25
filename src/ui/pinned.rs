@@ -7,40 +7,24 @@ use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 use crate::app::{App, Focus};
 use crate::format::format_value;
 use crate::theme;
+use crate::ui::metrics::rate_cell;
 
 pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let is_focused = app.focus == Focus::Pinned;
 
-    // Collect pinned metric data before borrowing table_state mutably
-    let pinned_data: Vec<(String, i64, Option<i64>)> = app
-        .pinned_metrics()
-        .iter()
-        .map(|m| (m.path.clone(), m.current, m.delta()))
-        .collect();
+    // Clone pinned entries up front so we can borrow `app` mutably for table state below.
+    let pinned: Vec<crate::app::MetricEntry> =
+        app.pinned_metrics().iter().map(|m| (*m).clone()).collect();
 
-    let rows: Vec<Row> = pinned_data
+    let rows: Vec<Row> = pinned
         .iter()
-        .map(|(path, current, delta)| {
-            let path_cell = Cell::from(Span::styled(path.as_str(), theme::METRIC_PATH_STYLE));
-
+        .map(|m| {
+            let path_cell = Cell::from(Span::styled(m.path.clone(), theme::METRIC_PATH_STYLE));
             let value_cell = Cell::from(Span::styled(
-                format_value(path, *current),
+                format_value(&m.path, m.current),
                 theme::VALUE_NORMAL,
             ));
-
-            let delta_cell = match delta {
-                Some(d) if *d > 0 => Cell::from(Span::styled(
-                    format!("+{}", format_value(path, *d)),
-                    theme::DELTA_POSITIVE,
-                )),
-                Some(d) if *d < 0 => {
-                    Cell::from(Span::styled(format_value(path, *d), theme::DELTA_NEGATIVE))
-                }
-                Some(_) => Cell::from(Span::styled("0", theme::DELTA_ZERO)),
-                None => Cell::from(Span::styled("-", theme::DELTA_ZERO)),
-            };
-
-            Row::new(vec![path_cell, value_cell, delta_cell])
+            Row::new(vec![path_cell, value_cell, rate_cell(m)])
         })
         .collect();
 
@@ -62,7 +46,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
         Row::new(vec![
             Cell::from("Pinned Metric".bold()),
             Cell::from("Value".bold()),
-            Cell::from("Delta".bold()),
+            Cell::from("Rate".bold()),
         ])
         .style(theme::PINNED_BORDER),
     )

@@ -1,30 +1,32 @@
 # mmx — mongometrics
 
-An htop-like TUI for exploring MongoDB FTDC (Full Time Diagnostic Data Capture) files.
+A real-time terminal dashboard for MongoDB. Polls `serverStatus` once per second
+and renders a Grafana-style grid of charts plus a searchable metric drawer.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│ mmx | ./diagnostic.data | 487 metrics | 1024 chunks │
-├─────────────────────────────────────────────────────┤
-│ ┌ Pinned ─────────────────────────────────────────┐ │
-│ │ serverStatus.connections.current    42       +1  │ │
-│ │ serverStatus.opcounters.query       1.5K    +12  │ │
-│ └─────────────────────────────────────────────────┘ │
-│ ┌ Metrics (487) ──────────────────────────────────┐ │
-│ │ Metric Path                     Value    Delta  │ │
-│ │ serverStatus.asserts.msg        0        -      │ │
-│ │ serverStatus.asserts.regular    0        -      │ │
-│ │ serverStatus.asserts.user       3        +1     │ │
-│ │ serverStatus.connections.avail  838      -1     │ │
-│ │ ...                                             │ │
-│ └─────────────────────────────────────────────────┘ │
-│ q:quit j/k:nav p:pin /:search Tab:focus ?:help      │
-└─────────────────────────────────────────────────────┘
+┌ mmx │ 127.0.0.1:27017 │ Surfboard.local v8.2.7 │ 3196 metrics │ polls 47 │ last 0s ago │ 14:32:07 │ window 5m │ ● connected ─┐
+│ ┌ ops/s [1] ──────────────────────┐ ┌ connections [2] ────────────────┐ ┌ network [3] ────────────────────┐ │
+│ │ insert  124/s        ▁▂▃▂▁▂▃▄▄ │ │ current  87  ▁▁▂▃▃▃▄▄▄▄▄▄▄      │ │ in    12.4 MB/s ▂▃▄▅▆▆▇▇▇▆▆▅▄▃ │ │
+│ │ query 2,345/s        ▁▃▅▆▇▇▇▆▅ │ │ active   42  ▁▁▁▂▃▃▃▃▃▃▄▄▄      │ │ out    3.1 MB/s ▁▂▃▄▄▄▄▄▄▄▄▃▂▁ │ │
+│ └─────────────────────────────────┘ └─────────────────────────────────┘ └─────────────────────────────────┘ │
+│ ┌ queues [4] ─────────────────────┐ ┌ WiredTiger cache [5] ───────────┐ ┌ memory (MiB) [6] ───────────────┐ │
+│ │ readers      0                  │ │ in cache  62 MiB ▁▂▃▃▄▄▄▄▄▄▄    │ │ resident  248                   │ │
+│ │ writers      2  ▁▁▁▂▃▂▁▁▁       │ │ dirty     18 MiB ▁▂▂▃▂▁▁▁▁      │ │ virtual   2.1 GiB               │ │
+│ └─────────────────────────────────┘ └─────────────────────────────────┘ └─────────────────────────────────┘ │
+│ ┌ Metrics (3196) ────────────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ Metric Path                                            Value         Rate                              │ │
+│ │ * opcounters.insert                                    1,245       +124/s                              │ │
+│ │   opcounters.query                                    23,401     +2,345/s                              │ │
+│ │   ...                                                                                                  │ │
+│ └────────────────────────────────────────────────────────────────────────────────────────────────────────┘ │
+│ q:quit j/k:nav p:pin /:search Space:pause +/-:window 1-6:expand ?:help                                     │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Prerequisites
 
 - Rust 1.85+ (`rustup` recommended: https://rustup.rs)
+- A reachable mongod (standalone, replica set, or sharded cluster)
 
 ## Build
 
@@ -38,95 +40,128 @@ cargo build
 cargo build --release
 
 # Install to ~/.cargo/bin
-cargo install --path crates/mmx-tui
+cargo install --path .
 ```
 
-The binary is called `mmx` and will be at `target/release/mmx` (or `target/debug/mmx`).
+The binary is `mmx`; it lands at `target/release/mmx` (or `target/debug/mmx`).
 
 ## Usage
 
 ```bash
-# Point at a single FTDC file
-mmx /data/db/diagnostic.data/metrics.2024-01-01T00-00-00Z-00000
+# Standalone or any single host
+mmx --uri mongodb://127.0.0.1:27017/?directConnection=true
 
-# Point at a diagnostic.data directory (reads all files)
-mmx /data/db/diagnostic.data
+# Replica set / SRV — picks a host based on the read preference (default: primary)
+mmx --uri "mongodb+srv://user:pw@cluster0.mongodb.net" --read-preference secondaryPreferred
+
+# Connect, poll once, print a summary, exit (handy for sanity-checking a URI)
+mmx --uri mongodb://localhost:27017 --probe
+
+# Slow it down or speed it up
+mmx --uri mongodb://localhost:27017 --interval 2s
 ```
+
+Useful flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--uri` | (required) | MongoDB connection string |
+| `--interval` | `1s` | Poll interval (`ms`/`s`/`m` units) |
+| `--read-preference` | `primary` | `primary`, `primary-preferred`, `secondary`, `secondary-preferred`, `nearest` |
+| `--connect-timeout` | `3s` | Driver TCP connect timeout |
+| `--server-selection-timeout` | `2s` | Driver SDAM timeout — kept low so a missed tick fails fast |
+| `--app-name` | `mmx` | Sent as `appName` so it shows up in `db.currentOp()` |
+| `--tls-allow-invalid-certs` | off | Insecure TLS bypass for local dev |
+| `--probe` | off | Connect, poll once, print a summary, and exit |
 
 ## Keybindings
 
 | Key | Action |
 |-----|--------|
 | `q` / `Ctrl+C` | Quit |
-| `j` / `↓` | Move down |
-| `k` / `↑` | Move up |
+| `j` / `↓` | Move selection down (in metric drawer) |
+| `k` / `↑` | Move selection up |
 | `g` / `Home` | Jump to top |
 | `G` / `End` | Jump to bottom |
-| `p` | Pin/unpin metric |
+| `p` | Pin/unpin selected metric |
 | `/` | Search/filter |
-| `Esc` | Clear search |
-| `?` | Help overlay |
-| `Tab` | Switch pinned/main focus |
+| `Esc` | Collapse panel / clear search / close help |
+| `Tab` | Switch focus between Pinned and Main drawer |
+| `Space` | Pause/resume polling |
+| `+` / `-` | Cycle chart time window: 1m → 5m → 15m |
+| `1`–`6` | Expand the corresponding panel to fullscreen |
+| `?` | Toggle help overlay |
 
 ## Architecture
 
 ```
 mmx/
-├── crates/
-│   ├── mmx-ftdc/    # FTDC parser library (standalone, no TUI deps)
-│   └── mmx-tui/     # TUI binary
-└── test-data/       # Sample FTDC files
+├── Cargo.toml
+└── src/
+    ├── main.rs          # CLI, terminal setup, event loop, key handling
+    ├── source.rs        # MetricSource trait + ServerStatusSource
+    ├── bson_ext.rs      # Flatten serverStatus BSON → (path, i64) pairs
+    ├── metric.rs        # MetricKind classification, history ring, rate computation
+    ├── app.rs           # App state (Elm) + Message + update()
+    ├── event.rs         # Async tick/render/key event handler
+    ├── format.rs        # Human-readable value/rate formatting
+    ├── theme.rs         # Color palette
+    └── ui/
+        ├── mod.rs       # Top-level layout + help overlay
+        ├── header.rs    # Title bar (URI, host, version, polls, connection state)
+        ├── chart.rs     # Chart panel + dashboard grid + Panel definitions
+        ├── pinned.rs    # Pinned metrics drawer
+        ├── metrics.rs   # Scrollable metric drawer with rate/delta column
+        └── footer.rs    # Keybinding hint bar
 ```
 
-### FTDC Parser Pipeline
+### Polling Pipeline
 
-The `mmx-ftdc` crate implements the full FTDC binary format decoding:
+1. `ServerStatusSource::connect` parses the URI and builds a `mongodb::Client`
+   with fail-fast timeouts (`server_selection_timeout=2s`).
+2. A tokio interval task calls `db.run_command({serverStatus: 1})` every
+   `--interval`, classifying any error as `Transient` (banner + retry) or
+   `Fatal` (banner + stop).
+3. The returned `bson::Document` is flattened by `bson_ext::flatten_bson`
+   into a flat `Vec<(path, i64)>`.
+4. `App::merge_sample` updates the per-metric state and pushes a timestamped
+   value into a 900-entry ring buffer (15 min @ 1 Hz).
+5. The render task draws the dashboard at 100ms.
 
-1. **Read** sequential BSON documents from file
-2. **Classify** by type: metadata (0), metric chunk (1), metadata delta (2)
-3. **Decompress** metric chunks (zlib)
-4. **Parse** reference BSON document → flatten to numeric fields with dot-separated paths
-5. **Decode** varint delta stream with zero-RLE encoding
-6. **Reconstruct** values via zigzag decode + cumulative sum
+### Counter vs Gauge
+
+`metric::classify` heuristically labels each path as a counter or gauge based
+on suffix and prefix patterns (e.g. `connections.current` → gauge,
+`opcounters.insert` → counter). The drawer shows counters as a per-second
+**rate**, gauges as a one-tick **delta**. Negative deltas on a counter are
+treated as a mongod restart and skipped.
 
 ### TUI Architecture
 
-Follows the Elm (TEA) pattern:
+Standard Elm (TEA) pattern:
 
-- **Model** (`app.rs`): Centralized `App` state with metrics, table state, pinned set, filter, mode
-- **Update** (`app.rs`): Pure `update(Message)` state transitions
-- **View** (`ui/`): Stateless rendering functions that read `App` state
+- **Model** (`app.rs`): the `App` struct
+- **Update** (`app.rs`): pure `update(Message)` transitions
+- **View** (`ui/`): stateless render functions that read `App`
 
-The event loop runs on tokio with separate rates:
-- **Tick** (1s): Reload FTDC data from disk
-- **Render** (100ms): Redraw the terminal for smooth interaction
+Two tokio intervals drive the loop: a 1s app tick (UI age refresh) and a 100ms
+render. Polling runs on a separate task and pushes `Sample` / `PollFailed` /
+`PollFatal` into the same channel as keyboard input.
 
-### Value Formatting
+## Local Testing with mongod
 
-Metric values are formatted based on path heuristics:
-- Byte metrics (`*.bytes*`, `*.memory*`) → `1.0 GiB`, `256 KiB`
-- Duration metrics (`*millis*`, `*micros*`) → `1.5s`, `500ms`
-- Counters → `1.5M`, `10.0K`
+`scripts/generate_load.sh` spins up a temporary `mongod` and runs a CRUD workload
+against it — useful for exercising the dashboard with real, moving counters.
 
-## Generating Test Data
-
-If you don't have local FTDC files, the `scripts/` directory can spin up a
-temporary mongod, run a workload against it, and copy the resulting FTDC data into `test-data/`.
-
-**Requirements:** A local MongoDB build (or install) with `mongod` and `mongosh` binaries.
+**Requirements:** local MongoDB binaries (`mongod`, `mongosh`).
 
 ```bash
-# Basic — runs a default 60s workload with 8 parallel workers
-./scripts/generate_load.sh /path/to/mongo/bin
+# In one terminal: start mongod + a 120s workload
+./scripts/generate_load.sh -d 120 /path/to/mongo/bin
+# (note the printed dbpath / port)
 
-# shorter run
-./scripts/generate_load.sh -d 30 /path/to/mongo/bin
-
-# heavier workload — 2 min, 16 parallel workers, 1KB docs
-./scripts/generate_load.sh -d 120 -w 16 -s 1024 /path/to/mongo/bin
-
-# use a different port (if 27017 is taken)
-./scripts/generate_load.sh -p 27018 /path/to/mongo/bin
+# In another terminal: point mmx at it
+./target/release/mmx --uri "mongodb://127.0.0.1:27017/?directConnection=true"
 ```
 
 | Option | Default | Description |
@@ -136,28 +171,13 @@ temporary mongod, run a workload against it, and copy the resulting FTDC data in
 | `-s`, `--doc-size` | `512` | Approximate document payload size in bytes |
 | `-p`, `--port` | `27017` | mongod listen port |
 
-The script (`generate_load.sh`) handles the full lifecycle automatically:
-
-1. Starts a temporary `mongod` with a replica set in a temp directory
-2. Runs `workload.js` via `mongosh` — a randomized CRUD workload (inserts,
-   finds, updates, deletes) with configurable concurrency, duration, and
-   document size
-3. Copies the resulting `diagnostic.data/` directory into `test-data/`
-4. Shuts down and cleans up the mongod on exit (including on Ctrl+C)
-
-The FTDC files land in `test-data/diagnostic.data/` and can be viewed with:
-
-```bash
-cargo run -- test-data/diagnostic.data
-```
-
 ## Development
 
 ```bash
-cargo build                    # Build
-cargo test                     # Test (44 tests)
-cargo clippy -- -D warnings    # Lint
-cargo fmt                      # Format
+cargo build                            # Build
+cargo test                             # 33 tests
+cargo clippy --all-targets -- -D warnings   # Lint
+cargo fmt                              # Format
 ```
 
 ## License

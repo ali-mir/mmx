@@ -1,20 +1,20 @@
-[workspace]
-members = ["crates/mmx-ftdc", "crates/mmx-tui"]
-resolver = "3"
-
-[workspace.package]
-edition = "2024"
+[package]
+name = "mmx"
 version = "0.1.0"
+edition = "2024"
 license = "MIT"
+description = "real-time terminal dashboard for MongoDB serverStatus metrics"
 
-[workspace.dependencies]
-mmx-ftdc = { path = "crates/mmx-ftdc" }
+[[bin]]
+name = "mmx"
+path = "src/main.rs"
+
+[dependencies]
 bson = "2"
-flate2 = "1"
+mongodb = { version = "3", features = ["snappy-compression", "zstd-compression"] }
 ratatui = "0.29"
 crossterm = "0.28"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
-notify = "7"
 libc = "0.2"

@@ -1,23 +1,49 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::time::Instant;
 
 use ratatui::widgets::TableState;
+
+use crate::metric::{MetricKind, TimedValue, classify, push_history, rate_per_sec};
+use crate::source::Sample;
 
 /// A single metric entry with its current state.
 #[derive(Debug, Clone)]
 pub struct MetricEntry {
     pub path: String,
+    pub kind: MetricKind,
     pub current: i64,
     pub previous: Option<i64>,
-    pub history: Vec<i64>,
+    pub history: VecDeque<TimedValue>,
 }
 
 impl MetricEntry {
+    pub fn new(path: String, value: i64, at: Instant) -> Self {
+        let kind = classify(&path);
+        let mut history = VecDeque::new();
+        history.push_back(TimedValue { at, value });
+        MetricEntry {
+            path,
+            kind,
+            current: value,
+            previous: None,
+            history,
+        }
+    }
+
     pub fn delta(&self) -> Option<i64> {
         self.previous.map(|prev| self.current.wrapping_sub(prev))
     }
+
+    /// Per-second rate based on last two history samples. Always `None` for
+    /// gauges; `None` for counters until we have ≥2 samples or after a reset.
+    pub fn rate_per_sec(&self) -> Option<f64> {
+        match self.kind {
+            MetricKind::Counter => rate_per_sec(&self.history),
+            MetricKind::Gauge => None,
+        }
+    }
 }
 
-/// The mode the application is in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
     Normal,
@@ -25,11 +51,59 @@ pub enum AppMode {
     Help,
 }
 
-/// Which panel has focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Focus {
     Main,
     Pinned,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConnectionState {
+    Connected,
+    Reconnecting(String),
+    Failed(String),
+}
+
+/// Time window the chart panels render. Cycle with `+` / `-`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowSpec {
+    OneMinute,
+    FiveMinutes,
+    FifteenMinutes,
+}
+
+impl WindowSpec {
+    pub fn seconds(self) -> f64 {
+        match self {
+            WindowSpec::OneMinute => 60.0,
+            WindowSpec::FiveMinutes => 300.0,
+            WindowSpec::FifteenMinutes => 900.0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WindowSpec::OneMinute => "1m",
+            WindowSpec::FiveMinutes => "5m",
+            WindowSpec::FifteenMinutes => "15m",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            WindowSpec::OneMinute => WindowSpec::FiveMinutes,
+            WindowSpec::FiveMinutes => WindowSpec::FifteenMinutes,
+            WindowSpec::FifteenMinutes => WindowSpec::OneMinute,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            WindowSpec::OneMinute => WindowSpec::FifteenMinutes,
+            WindowSpec::FiveMinutes => WindowSpec::OneMinute,
+            WindowSpec::FifteenMinutes => WindowSpec::FiveMinutes,
+        }
+    }
 }
 
 /// Messages that drive state transitions (Elm architecture).
@@ -47,6 +121,14 @@ pub enum Message {
     SearchBackspace,
     ToggleHelp,
     ToggleFocus,
+    SampleArrived(Sample),
+    PollFailed(String),
+    PollFatal(String),
+    TogglePause,
+    NextWindow,
+    PrevWindow,
+    ExpandPanel(usize),
+    CollapsePanel,
     UpdateMetrics(Vec<MetricEntry>),
     Tick,
     Quit,
@@ -61,15 +143,21 @@ pub struct App {
     pub filter: String,
     pub mode: AppMode,
     pub focus: Focus,
-    pub file_path: String,
-    pub sample_epoch_ms: Option<i64>,
-    pub sample_count: usize,
+    pub source_label: String,
+    pub host: Option<String>,
+    pub version: Option<String>,
+    pub last_poll: Option<Instant>,
+    pub poll_count: usize,
+    pub connection: ConnectionState,
+    pub paused: bool,
+    pub window: WindowSpec,
+    pub expanded_panel: Option<usize>,
     pub tick_count: usize,
     pub should_quit: bool,
 }
 
 impl App {
-    pub fn new(file_path: String) -> Self {
+    pub fn new(source_label: String) -> Self {
         let mut table_state = TableState::default();
         table_state.select(Some(0));
         App {
@@ -80,11 +168,16 @@ impl App {
             filter: String::new(),
             mode: AppMode::Normal,
             focus: Focus::Main,
-            file_path,
-            sample_epoch_ms: None,
-            sample_count: 0,
+            source_label,
+            host: None,
+            version: None,
+            last_poll: None,
+            poll_count: 0,
+            connection: ConnectionState::Reconnecting("connecting…".into()),
+            paused: false,
+            window: WindowSpec::FiveMinutes,
+            expanded_panel: None,
             tick_count: 0,
-
             should_quit: false,
         }
     }
@@ -170,7 +263,6 @@ impl App {
             }
             Message::SearchInput(c) => {
                 self.filter.push(c);
-                // Reset selection when filter changes
                 self.table_state.select(Some(0));
             }
             Message::SearchBackspace => {
@@ -192,42 +284,115 @@ impl App {
                     };
                 }
             }
-            Message::UpdateMetrics(new_metrics) => {
-                // Merge with existing: always use within-chunk previous for delta display,
-                // and track history when the value actually changes.
-                for new in &new_metrics {
-                    if let Some(existing) = self.metrics.iter_mut().find(|m| m.path == new.path) {
-                        if new.current != existing.current {
-                            existing.history.push(new.current);
-                            // Keep last 300 samples
-                            if existing.history.len() > 300 {
-                                existing.history.remove(0);
-                            }
-                        }
-                        existing.current = new.current;
-                        existing.previous = new.previous;
-                    }
+            Message::SampleArrived(sample) => {
+                // Connection state still updates while paused so the user can
+                // see when the link drops. Sample is ignored for merging only.
+                self.connection = ConnectionState::Connected;
+                if self.paused {
+                    return;
                 }
-                // Add any new metrics not yet seen
-                for new in new_metrics {
-                    if !self.metrics.iter().any(|m| m.path == new.path) {
-                        self.metrics.push(new);
-                    }
+                if sample.host.is_some() {
+                    self.host = sample.host;
                 }
-                // Sort by priority group, then alphabetically within each group
-                self.metrics
-                    .sort_by(|a, b| metric_sort_key(&a.path).cmp(&metric_sort_key(&b.path)));
+                if sample.version.is_some() {
+                    self.version = sample.version;
+                }
+                let now = Instant::now();
+                self.last_poll = Some(now);
+                self.poll_count += 1;
+                self.merge_sample(sample.metrics, now);
             }
-            Message::Tick => {
-                // Tick is handled externally; this is a no-op in state
+            Message::PollFailed(reason) => {
+                self.connection = ConnectionState::Reconnecting(reason);
             }
+            Message::PollFatal(reason) => {
+                self.connection = ConnectionState::Failed(reason);
+            }
+            Message::TogglePause => {
+                self.paused = !self.paused;
+            }
+            Message::NextWindow => {
+                self.window = self.window.next();
+            }
+            Message::PrevWindow => {
+                self.window = self.window.prev();
+            }
+            Message::ExpandPanel(i) => {
+                self.expanded_panel = Some(i);
+            }
+            Message::CollapsePanel => {
+                self.expanded_panel = None;
+            }
+            #[cfg(test)]
+            Message::UpdateMetrics(entries) => {
+                self.merge_metrics(entries);
+            }
+            #[cfg(not(test))]
+            Message::UpdateMetrics(_) => {}
+            Message::Tick => {}
             Message::Quit => {
                 self.should_quit = true;
             }
         }
     }
 
-    /// Return metrics filtered by the current search string.
+    /// Merge a new sample (from `Sample.metrics`) into existing entries:
+    /// update `current`/`previous` and append a timestamped value to history.
+    fn merge_sample(&mut self, new_metrics: Vec<crate::bson_ext::FlatMetric>, at: Instant) {
+        use std::collections::HashMap;
+        let by_path: HashMap<String, usize> = self
+            .metrics
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.path.clone(), i))
+            .collect();
+
+        let mut additions: Vec<MetricEntry> = Vec::new();
+        for new in new_metrics {
+            if let Some(&i) = by_path.get(new.path.as_str()) {
+                let existing = &mut self.metrics[i];
+                existing.previous = Some(existing.current);
+                existing.current = new.value;
+                push_history(
+                    &mut existing.history,
+                    TimedValue {
+                        at,
+                        value: new.value,
+                    },
+                );
+            } else {
+                additions.push(MetricEntry::new(new.path, new.value, at));
+            }
+        }
+
+        if !additions.is_empty() {
+            self.metrics.extend(additions);
+            self.metrics
+                .sort_by(|a, b| metric_sort_key(&a.path).cmp(&metric_sort_key(&b.path)));
+        }
+    }
+
+    #[cfg(test)]
+    fn merge_metrics(&mut self, new_metrics: Vec<MetricEntry>) {
+        for new in new_metrics {
+            if let Some(existing) = self.metrics.iter_mut().find(|m| m.path == new.path) {
+                existing.previous = Some(existing.current);
+                existing.current = new.current;
+                push_history(
+                    &mut existing.history,
+                    TimedValue {
+                        at: Instant::now(),
+                        value: new.current,
+                    },
+                );
+            } else {
+                self.metrics.push(new);
+            }
+        }
+        self.metrics
+            .sort_by(|a, b| metric_sort_key(&a.path).cmp(&metric_sort_key(&b.path)));
+    }
+
     pub fn filtered_metrics(&self) -> Vec<&MetricEntry> {
         let filter_lower = self.filter.to_lowercase();
         self.metrics
@@ -242,7 +407,6 @@ impl App {
             .collect()
     }
 
-    /// Return pinned metrics in sorted order.
     pub fn pinned_metrics(&self) -> Vec<&MetricEntry> {
         self.metrics
             .iter()
@@ -255,14 +419,14 @@ impl App {
     }
 }
 
-/// Sort priority: lower number = higher in the list.
-/// Groups: opcounters (0), connections (1), replication (2), everything else (3).
+/// Sort priority: opcounters → connections → repl → everything else,
+/// alphabetical within each group.
 fn metric_sort_key(path: &str) -> (u8, &str) {
-    let group = if path.starts_with("serverStatus.opcounters") {
+    let group = if path.starts_with("opcounters") {
         0
-    } else if path.starts_with("serverStatus.connections") {
+    } else if path.starts_with("connections") {
         1
-    } else if path.starts_with("replSetGetStatus") {
+    } else if path.starts_with("repl") {
         2
     } else {
         3
@@ -275,25 +439,11 @@ mod tests {
     use super::*;
 
     fn sample_metrics() -> Vec<MetricEntry> {
+        let t = Instant::now();
         vec![
-            MetricEntry {
-                path: "a.b.c".into(),
-                current: 10,
-                previous: None,
-                history: vec![10],
-            },
-            MetricEntry {
-                path: "x.y.z".into(),
-                current: 20,
-                previous: None,
-                history: vec![20],
-            },
-            MetricEntry {
-                path: "m.n.o".into(),
-                current: 30,
-                previous: None,
-                history: vec![30],
-            },
+            MetricEntry::new("a.b.c".into(), 10, t),
+            MetricEntry::new("x.y.z".into(), 20, t),
+            MetricEntry::new("m.n.o".into(), 30, t),
         ]
     }
 
@@ -306,7 +456,7 @@ mod tests {
         assert_eq!(app.table_state.selected(), Some(1));
         app.update(Message::MoveDown);
         assert_eq!(app.table_state.selected(), Some(2));
-        app.update(Message::MoveDown); // should not go past end
+        app.update(Message::MoveDown);
         assert_eq!(app.table_state.selected(), Some(2));
     }
 
@@ -321,7 +471,7 @@ mod tests {
         assert_eq!(app.table_state.selected(), Some(1));
         app.update(Message::MoveUp);
         assert_eq!(app.table_state.selected(), Some(0));
-        app.update(Message::MoveUp); // should not go negative
+        app.update(Message::MoveUp);
         assert_eq!(app.table_state.selected(), Some(0));
     }
 
@@ -342,11 +492,9 @@ mod tests {
         assert!(app.pinned.is_empty());
 
         app.update(Message::TogglePin);
-        // Should pin the first metric (selected=0, sorted: a.b.c)
         assert!(app.pinned.contains("a.b.c"));
 
         app.update(Message::TogglePin);
-        // Toggle again should unpin
         assert!(!app.pinned.contains("a.b.c"));
     }
 
@@ -396,32 +544,31 @@ mod tests {
         app.update(Message::UpdateMetrics(sample_metrics()));
         assert_eq!(app.focus, Focus::Main);
 
-        // Should not change focus if nothing is pinned
         app.update(Message::ToggleFocus);
         assert_eq!(app.focus, Focus::Main);
     }
 
     #[test]
-    fn test_update_metrics_preserves_history() {
+    fn test_merge_tracks_previous_and_history() {
         let mut app = App::new("test".into());
-        app.update(Message::UpdateMetrics(vec![MetricEntry {
-            path: "a".into(),
-            current: 10,
-            previous: None,
-            history: vec![10],
-        }]));
+        let t = Instant::now();
+        app.update(Message::UpdateMetrics(vec![MetricEntry::new(
+            "a".into(),
+            10,
+            t,
+        )]));
         assert_eq!(app.metrics[0].current, 10);
         assert_eq!(app.metrics[0].previous, None);
 
-        // previous comes from the new data (within-chunk delta), not app tracking
-        app.update(Message::UpdateMetrics(vec![MetricEntry {
-            path: "a".into(),
-            current: 20,
-            previous: Some(15),
-            history: vec![20],
-        }]));
+        app.update(Message::UpdateMetrics(vec![MetricEntry::new(
+            "a".into(),
+            20,
+            t,
+        )]));
         assert_eq!(app.metrics[0].current, 20);
-        assert_eq!(app.metrics[0].previous, Some(15));
-        assert_eq!(app.metrics[0].history, vec![10, 20]);
+        assert_eq!(app.metrics[0].previous, Some(10));
+        assert_eq!(app.metrics[0].delta(), Some(10));
+        assert_eq!(app.metrics[0].history.len(), 2);
+        assert_eq!(app.metrics[0].history.back().unwrap().value, 20);
     }
 }

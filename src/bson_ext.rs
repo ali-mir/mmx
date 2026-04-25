@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_double() {
-        let doc = doc! { "rate": 3.14_f64 };
+        let doc = doc! { "rate": 3.5_f64 };
         let flat = flatten_bson(&doc);
         assert_eq!(flat[0].value, 3); // truncated
     }

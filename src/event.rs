@@ -3,36 +3,40 @@ use std::time::Duration;
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
 use tokio::sync::mpsc;
 
+use crate::source::Sample;
+
 /// Application events.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Event {
-    /// Terminal key press.
     Key(KeyEvent),
-    /// Terminal mouse event.
     Mouse(MouseEvent),
-    /// Terminal resize.
     Resize(u16, u16),
-    /// Periodic tick for data refresh.
+    /// Periodic tick (UI age refresh; not the data poll).
     Tick,
     /// Periodic render trigger.
     Render,
+    /// New sample from the metric source.
+    Sample(Sample),
+    /// Source poll failed transiently — keep polling.
+    PollFailed(String),
+    /// Source poll failed fatally — stop polling.
+    PollFatal(String),
 }
 
-/// Async event handler that polls crossterm events and emits ticks/renders.
+/// Async event handler. Crossterm input + tick/render timers run on internal
+/// tasks; the polling task is spawned by `main` and pushes via [`Self::sender`].
 pub struct EventHandler {
     rx: mpsc::UnboundedReceiver<Event>,
+    tx: mpsc::UnboundedSender<Event>,
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl EventHandler {
-    /// Create a new EventHandler with the given tick and render intervals.
     pub fn new(tick_rate: Duration, render_rate: Duration) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-
         let mut tasks = Vec::new();
 
-        // Tick emitter
         let tx_tick = tx.clone();
         tasks.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(tick_rate);
@@ -44,7 +48,6 @@ impl EventHandler {
             }
         }));
 
-        // Render emitter
         let tx_render = tx.clone();
         tasks.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(render_rate);
@@ -56,7 +59,7 @@ impl EventHandler {
             }
         }));
 
-        // Crossterm event poller
+        let tx_input = tx.clone();
         tasks.push(tokio::spawn(async move {
             loop {
                 let maybe_event = tokio::task::spawn_blocking(|| {
@@ -73,17 +76,26 @@ impl EventHandler {
                         CrosstermEvent::Resize(w, h) => Event::Resize(w, h),
                         _ => continue,
                     };
-                    if tx.send(event).is_err() {
+                    if tx_input.send(event).is_err() {
                         break;
                     }
                 }
             }
         }));
 
-        EventHandler { rx, _tasks: tasks }
+        EventHandler {
+            rx,
+            tx,
+            _tasks: tasks,
+        }
     }
 
-    /// Receive the next event.
+    /// Clone of the internal sender for external producers (e.g. the metric
+    /// poll task pushing `Event::Sample` / `Event::PollFailed` / `Event::PollFatal`).
+    pub fn sender(&self) -> mpsc::UnboundedSender<Event> {
+        self.tx.clone()
+    }
+
     pub async fn next(&mut self) -> Option<Event> {
         self.rx.recv().await
     }

@@ -1,3 +1,25 @@
+/// Format a per-second rate based on metric path. Bytes-per-second for byte
+/// metrics, decimal otherwise. Values below 1/s show one decimal place; larger
+/// values are rounded and run through the same K/M/B abbreviation.
+pub fn format_rate(path: &str, rate: f64) -> String {
+    let path_lower = path.to_lowercase();
+    if rate.abs() < 0.05 {
+        return "0/s".to_string();
+    }
+    if rate.abs() < 10.0 {
+        if is_byte_metric(&path_lower) {
+            return format!("{rate:.1} B/s");
+        }
+        return format!("{rate:.1}/s");
+    }
+    let rounded = rate.round() as i64;
+    if is_byte_metric(&path_lower) {
+        format!("{}/s", format_bytes(rounded))
+    } else {
+        format!("{}/s", format_number(rounded))
+    }
+}
+
 /// Format a metric value with human-readable units based on the metric path.
 pub fn format_value(path: &str, value: i64) -> String {
     let path_lower = path.to_lowercase();

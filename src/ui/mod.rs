@@ -1,7 +1,10 @@
+pub mod chart;
 pub mod footer;
 pub mod header;
 pub mod metrics;
 pub mod pinned;
+
+use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -14,15 +17,16 @@ use crate::theme;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let has_pinned = !app.pinned.is_empty();
+    let now = Instant::now();
 
-    // Build constraints based on whether pinned section is visible
     let mut constraints = vec![Constraint::Length(1)]; // header
     if has_pinned {
         let pinned_count = app.pinned_metrics().len();
-        // 2 for border, 1 for header row, N for pinned metrics
         constraints.push(Constraint::Length((pinned_count as u16 + 3).min(12)));
     }
-    constraints.push(Constraint::Fill(1)); // main metrics
+    // Charts: take ~60% of the remaining vertical space (user wants big charts).
+    constraints.push(Constraint::Percentage(60)); // chart panel
+    constraints.push(Constraint::Min(8)); // metric drawer
     constraints.push(Constraint::Length(1)); // footer
 
     let chunks = Layout::vertical(constraints).split(f.area());
@@ -36,12 +40,21 @@ pub fn render(f: &mut Frame, app: &mut App) {
         idx += 1;
     }
 
+    chart::render_dashboard(
+        f,
+        chunks[idx],
+        app,
+        now,
+        app.window.seconds(),
+        app.expanded_panel,
+    );
+    idx += 1;
+
     metrics::render(f, chunks[idx], app);
     idx += 1;
 
     footer::render(f, chunks[idx], app);
 
-    // Help overlay
     if app.mode == AppMode::Help {
         render_help_overlay(f);
     }
@@ -49,7 +62,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
 fn render_help_overlay(f: &mut Frame) {
     let area = f.area();
-    // Center the overlay
     let width = 50u16.min(area.width.saturating_sub(4));
     let height = 18u16.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
@@ -66,8 +78,11 @@ fn render_help_overlay(f: &mut Frame) {
         ("G / End", "Jump to bottom"),
         ("p", "Pin/unpin selected metric"),
         ("/", "Enter search/filter mode"),
-        ("Esc", "Clear search / close overlay"),
         ("Tab", "Switch focus (pinned/main)"),
+        ("Space", "Pause/resume polling"),
+        ("+ / -", "Cycle time window (1m/5m/15m)"),
+        ("1 — 6", "Expand panel by index"),
+        ("Esc", "Collapse / clear search / close help"),
         ("?", "Toggle this help"),
     ];
 

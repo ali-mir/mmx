@@ -134,7 +134,7 @@ restart) → skip the rate this tick.
 | `/` | Enter search/filter mode |
 | `Tab` | Switch focus between pinned and main drawer |
 | `Space` | Pause/resume polling |
-| `+` / `-` | Cycle chart time window (1m / 5m / 15m) |
+| `+` / `-` | Cycle chart time window (10s / 30s / 1m / 5m / 10m, default 10s) |
 | `1`–`6` | Expand the corresponding panel to fullscreen |
 | `Esc` | Collapse panel / clear search / close help |
 | `?` | Toggle help overlay |

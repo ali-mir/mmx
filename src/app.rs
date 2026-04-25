@@ -67,41 +67,51 @@ pub enum ConnectionState {
 /// Time window the chart panels render. Cycle with `+` / `-`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowSpec {
+    TenSeconds,
+    ThirtySeconds,
     OneMinute,
     FiveMinutes,
-    FifteenMinutes,
+    TenMinutes,
 }
 
 impl WindowSpec {
     pub fn seconds(self) -> f64 {
         match self {
+            WindowSpec::TenSeconds => 10.0,
+            WindowSpec::ThirtySeconds => 30.0,
             WindowSpec::OneMinute => 60.0,
             WindowSpec::FiveMinutes => 300.0,
-            WindowSpec::FifteenMinutes => 900.0,
+            WindowSpec::TenMinutes => 600.0,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            WindowSpec::TenSeconds => "10s",
+            WindowSpec::ThirtySeconds => "30s",
             WindowSpec::OneMinute => "1m",
             WindowSpec::FiveMinutes => "5m",
-            WindowSpec::FifteenMinutes => "15m",
+            WindowSpec::TenMinutes => "10m",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
+            WindowSpec::TenSeconds => WindowSpec::ThirtySeconds,
+            WindowSpec::ThirtySeconds => WindowSpec::OneMinute,
             WindowSpec::OneMinute => WindowSpec::FiveMinutes,
-            WindowSpec::FiveMinutes => WindowSpec::FifteenMinutes,
-            WindowSpec::FifteenMinutes => WindowSpec::OneMinute,
+            WindowSpec::FiveMinutes => WindowSpec::TenMinutes,
+            WindowSpec::TenMinutes => WindowSpec::TenSeconds,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            WindowSpec::OneMinute => WindowSpec::FifteenMinutes,
+            WindowSpec::TenSeconds => WindowSpec::TenMinutes,
+            WindowSpec::ThirtySeconds => WindowSpec::TenSeconds,
+            WindowSpec::OneMinute => WindowSpec::ThirtySeconds,
             WindowSpec::FiveMinutes => WindowSpec::OneMinute,
-            WindowSpec::FifteenMinutes => WindowSpec::FiveMinutes,
+            WindowSpec::TenMinutes => WindowSpec::FiveMinutes,
         }
     }
 }
@@ -175,7 +185,7 @@ impl App {
             poll_count: 0,
             connection: ConnectionState::Reconnecting("connecting…".into()),
             paused: false,
-            window: WindowSpec::FiveMinutes,
+            window: WindowSpec::TenSeconds,
             expanded_panel: None,
             tick_count: 0,
             should_quit: false,

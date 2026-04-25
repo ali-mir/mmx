@@ -88,7 +88,7 @@ Useful flags:
 | `Esc` | Collapse panel / clear search / close help |
 | `Tab` | Switch focus between Pinned and Main drawer |
 | `Space` | Pause/resume polling |
-| `+` / `-` | Cycle chart time window: 1m → 5m → 15m |
+| `+` / `-` | Cycle chart time window: 10s → 30s → 1m → 5m → 10m (default 10s) |
 | `1`–`6` | Expand the corresponding panel to fullscreen |
 | `?` | Toggle help overlay |
 

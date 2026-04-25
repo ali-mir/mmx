@@ -83,7 +83,7 @@ fn render_help_overlay(f: &mut Frame) {
         ("/", "Enter search/filter mode"),
         ("Tab", "Switch focus (pinned/main)"),
         ("Space", "Pause/resume polling"),
-        ("+ / -", "Cycle time window (1m/5m/15m)"),
+        ("+ / -", "Cycle time window (10s/30s/1m/5m/10m)"),
         ("1 — 6", "Expand panel by index"),
         ("Esc", "Collapse / clear search / close help"),
         ("?", "Toggle this help"),

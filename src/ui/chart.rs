@@ -219,19 +219,24 @@ fn render_panel_with_index(
 }
 
 fn window_labels(window_secs: f64) -> Vec<Span<'static>> {
-    let total_min = (window_secs / 60.0) as i64;
-    if total_min <= 1 {
-        vec![Span::raw("-60s"), Span::raw("-30s"), Span::raw("now")]
+    let w = window_secs as i64;
+    let q2 = w * 2 / 3;
+    let q1 = w / 3;
+    vec![
+        Span::raw(fmt_ago(w)),
+        Span::raw(fmt_ago(q2)),
+        Span::raw(fmt_ago(q1)),
+        Span::raw("now"),
+    ]
+}
+
+fn fmt_ago(secs: i64) -> String {
+    if secs == 0 {
+        "now".to_string()
+    } else if secs < 60 || secs % 60 != 0 {
+        format!("-{secs}s")
     } else {
-        // Four ticks: -window, -2/3, -1/3, now.
-        let q3 = (window_secs * 2.0 / 3.0 / 60.0) as i64;
-        let q1 = (window_secs / 3.0 / 60.0) as i64;
-        vec![
-            Span::raw(format!("-{total_min}m")),
-            Span::raw(format!("-{q3}m")),
-            Span::raw(format!("-{q1}m")),
-            Span::raw("now"),
-        ]
+        format!("-{}m", secs / 60)
     }
 }
 

@@ -17,7 +17,10 @@ use crate::theme;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let has_pinned = !app.pinned.is_empty();
-    let now = Instant::now();
+    // Anchor chart "now" to the last successful poll, not the wall clock —
+    // otherwise already-plotted points drift leftward every render tick (10 Hz)
+    // instead of holding still and snapping over once per poll.
+    let now = app.last_poll.unwrap_or_else(Instant::now);
 
     let mut constraints = vec![Constraint::Length(1)]; // header
     if has_pinned {

@@ -6,7 +6,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::Span;
-use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, LegendPosition};
+use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, GraphType};
 
 use crate::app::App;
 use crate::format;
@@ -120,22 +120,37 @@ fn render_panel_inner(
             Span::raw(format_y(max_y, panel.y_format)),
         ]);
 
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+    // Build a multi-span title: panel name + an inline color-coded "legend".
+    // The built-in ratatui legend renders inside the plot area and the curves
+    // draw through it; putting it in the border title avoids that entirely.
+    let mut title_spans: Vec<Span<'static>> = vec![Span::styled(
         format!(" {}{} ", panel.title, title_suffix),
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
-    ));
+    )];
+    title_spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
+    for (i, s) in panel.series.iter().enumerate() {
+        if i > 0 {
+            title_spans.push(Span::raw(" "));
+        }
+        title_spans.push(Span::styled(
+            s.label.to_string(),
+            Style::default().fg(s.color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    title_spans.push(Span::raw(" "));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(ratatui::text::Line::from(title_spans));
 
     let chart = Chart::new(datasets)
         .block(block)
         .x_axis(x_axis)
         .y_axis(y_axis)
-        .legend_position(Some(LegendPosition::TopRight))
-        .hidden_legend_constraints((
-            ratatui::layout::Constraint::Ratio(1, 4),
-            ratatui::layout::Constraint::Ratio(1, 4),
-        ));
+        // Legend is rendered in the border title above; suppress the built-in.
+        .legend_position(None);
 
     f.render_widget(chart, area);
 }

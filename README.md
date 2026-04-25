@@ -1,7 +1,7 @@
 # mmx — mongometrics
 
-A real-time terminal dashboard for MongoDB. Polls `serverStatus` once per second
-and renders a Grafana-style grid of charts plus a searchable metric drawer.
+A real-time terminal dashboard for MongoDB metrics. Polls `serverStatus` once per second
+and renders a grid of charts plus a searchable metric drawer.
 
 ```
 ┌ mmx │ 127.0.0.1:27017 │ Surfboard.local v8.2.7 │ 3196 metrics │ polls 47 │ last 0s ago │ 14:32:07 │ window 5m │ ● connected ─┐
@@ -26,7 +26,7 @@ and renders a Grafana-style grid of charts plus a searchable metric drawer.
 ## Prerequisites
 
 - Rust 1.85+ (`rustup` recommended: https://rustup.rs)
-- A reachable mongod (standalone, replica set, or sharded cluster)
+- A reachable mongod
 
 ## Build
 
@@ -48,13 +48,13 @@ The binary is `mmx`; it lands at `target/release/mmx` (or `target/debug/mmx`).
 ## Usage
 
 ```bash
-# Standalone or any single host
+# Single host
 mmx --uri mongodb://127.0.0.1:27017/?directConnection=true
 
 # Replica set / SRV — picks a host based on the read preference (default: primary)
 mmx --uri "mongodb+srv://user:pw@cluster0.mongodb.net" --read-preference secondaryPreferred
 
-# Connect, poll once, print a summary, exit (handy for sanity-checking a URI)
+# Connect, poll once, print a summary, exit (useful for sanity-checking a URI)
 mmx --uri mongodb://localhost:27017 --probe
 
 # Slow it down or speed it up

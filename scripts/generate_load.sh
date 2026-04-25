@@ -55,20 +55,36 @@ TEST_DATA_DIR="$SCRIPT_DIR/../test-data"
 WORKLOAD_SCRIPT="$SCRIPT_DIR/workload.js"
 
 MONGOD="$MONGO_BIN/mongod"
-MONGOSH="$MONGO_BIN/mongosh"
 
 if [[ ! -x "$MONGOD" ]]; then
   echo "Error: mongod not found at $MONGOD"
   exit 1
 fi
 
-if [[ ! -x "$MONGOSH" ]]; then
-  echo "Error: mongosh not found at $MONGOSH"
+# Prefer mongosh from the provided bin dir; fall back to whatever is on PATH.
+if [[ -x "$MONGO_BIN/mongosh" ]]; then
+  MONGOSH="$MONGO_BIN/mongosh"
+elif command -v mongosh >/dev/null 2>&1; then
+  MONGOSH="$(command -v mongosh)"
+else
+  cat >&2 <<EOF
+Error: mongosh not found.
+
+Looked in:
+  - $MONGO_BIN/mongosh
+  - \$PATH
+
+mongosh is a separate download from mongod. Install it via one of:
+  - brew install mongosh                      (macOS)
+  - https://www.mongodb.com/try/download/shell
+  - drop the mongosh binary into $MONGO_BIN
+EOF
   exit 1
 fi
 
 echo "Config:"
 echo "  mongod:   $MONGOD"
+echo "  mongosh:  $MONGOSH"
 echo "  port:     $PORT"
 echo "  duration: ${DURATION}s"
 echo "  workers:  $WORKERS"
@@ -124,17 +140,3 @@ echo "Running workload..."
   "$WORKLOAD_SCRIPT"
 
 echo "Workload complete."
-
-FTDC_SRC="$DBPATH/diagnostic.data"
-DEST="$TEST_DATA_DIR/diagnostic.data"
-
-if [[ ! -d "$FTDC_SRC" ]]; then
-  echo "Error: diagnostic.data not found at $FTDC_SRC"
-  exit 1
-fi
-
-echo "Copying FTDC data to $DEST"
-rm -rf "$DEST"
-cp -a "$FTDC_SRC" "$DEST"
-
-echo "Done! FTDC data at: $DEST"
